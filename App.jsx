@@ -496,6 +496,8 @@ export default function App() {
     manager: ''
   });
   const [editBranchModal, setEditBranchModal] = useState(null); // branch object being edited
+  const [deleteBranchModal, setDeleteBranchModal] = useState(null); // branch object to delete
+  const [resetReportModal, setResetReportModal] = useState(null); // { scope: 'ALL'|branchId, target: 'all'|'trx'|'logs' }
 
   // Current active branch object
   const currentBranch = useMemo(
@@ -1130,6 +1132,7 @@ export default function App() {
         menuId: c.menu.id,
         name: c.menu.name,
         price: c.menu.price,
+        hpp: Number(c.menu.hpp) || 0,
         qty: c.qty
       })),
       subtotal: cartSummary.subtotal,
@@ -1504,6 +1507,77 @@ export default function App() {
     showToast(`Identitas kafe & nama struk untuk "${updated.name}" berhasil diperbarui!`);
   };
 
+  const handleConfirmDeleteBranch = () => {
+    if (!deleteBranchModal) return;
+    if (branches.length <= 1) {
+      showToast('Tidak dapat menghapus cabang terakhir! Minimal harus ada 1 cabang aktif.', 'error');
+      setDeleteBranchModal(null);
+      return;
+    }
+    const targetId = deleteBranchModal.id;
+    const targetName = deleteBranchModal.cafeName || deleteBranchModal.name;
+    const remainingBranches = branches.filter((b) => b.id !== targetId);
+
+    setBranches(remainingBranches);
+    if (selectedBranchId === targetId) {
+      setSelectedBranchId(remainingBranches[0].id);
+    }
+    if (reportBranchFilter === targetId) {
+      setReportBranchFilter('ALL');
+    }
+
+    // Clean up stock, transactions, logs, and cashier accounts tied to the closed branch
+    const nextStocks = { ...branchStocks };
+    delete nextStocks[targetId];
+    setBranchStocks(nextStocks);
+    setTransactions(transactions.filter((t) => t.branchId !== targetId));
+    setStockLogs(stockLogs.filter((l) => l.branchId !== targetId));
+    setUsers(users.filter((u) => u.role === 'owner' || u.branchId !== targetId));
+
+    setDeleteBranchModal(null);
+    showToast(`Cabang "${targetName}" beserta data terkait berhasil dihapus.`);
+  };
+
+  const handleConfirmResetReports = () => {
+    if (!resetReportModal) return;
+    const { scope, target } = resetReportModal;
+    const branchLabel =
+      scope === 'ALL'
+        ? 'Semua Cabang'
+        : branches.find((b) => b.id === scope)?.name || 'Cabang';
+
+    if (target === 'all' || target === 'trx') {
+      if (scope === 'ALL') {
+        setTransactions([]);
+      } else {
+        setTransactions(transactions.filter((t) => t.branchId !== scope));
+      }
+    }
+
+    if (target === 'all' || target === 'logs') {
+      if (scope === 'ALL') {
+        setStockLogs([]);
+      } else {
+        setStockLogs(stockLogs.filter((l) => l.branchId !== scope));
+      }
+    }
+
+    setResetReportModal(null);
+    showToast(`Riwayat laporan & mutasi (${branchLabel}) berhasil di-reset!`);
+  };
+
+  // Helper calculate total HPP for a transaction
+  const getTransactionHPP = (trx) => {
+    if (!trx?.items) return 0;
+    return trx.items.reduce((sum, item) => {
+      const itemHpp =
+        item.hpp !== undefined
+          ? Number(item.hpp)
+          : Number(menus.find((m) => m.id === item.menuId || m.name === item.name)?.hpp) || 0;
+      return sum + itemHpp * (Number(item.qty) || 0);
+    }, 0);
+  };
+
   // --- ANALYTICS & REPORTS ---
   const filteredTransactions = useMemo(() => {
     if (reportBranchFilter === 'ALL') return transactions;
@@ -1515,21 +1589,46 @@ export default function App() {
     return stockLogs.filter((l) => l.branchId === reportBranchFilter);
   }, [stockLogs, reportBranchFilter]);
 
+  const reportMetrics = useMemo(() => {
+    const totalOmzet = filteredTransactions.reduce((acc, t) => acc + t.total, 0);
+    const totalTax = filteredTransactions.reduce((acc, t) => acc + t.taxAmount, 0);
+    const netRevenueExTax = totalOmzet - totalTax;
+    const totalHPP = filteredTransactions.reduce((acc, t) => acc + getTransactionHPP(t), 0);
+    const totalRestockSpend = filteredStockLogs
+      .filter((l) => l.type === 'Restock Mandiri')
+      .reduce((acc, l) => acc + (l.totalCost || 0), 0);
+    const labaBersihPenjualan = netRevenueExTax - totalHPP;
+    const kasBersihSetelahRestock = totalOmzet - totalHPP - totalRestockSpend;
+    return {
+      totalOmzet,
+      totalTax,
+      netRevenueExTax,
+      totalHPP,
+      totalRestockSpend,
+      labaBersihPenjualan,
+      kasBersihSetelahRestock
+    };
+  }, [filteredTransactions, filteredStockLogs, menus]);
+
   const branchComparisonData = useMemo(() => {
     return branches.map((b) => {
       const branchTrx = transactions.filter((t) => t.branchId === b.id);
       const omzet = branchTrx.reduce((sum, t) => sum + t.total, 0);
+      const tax = branchTrx.reduce((sum, t) => sum + t.taxAmount, 0);
+      const hpp = branchTrx.reduce((sum, t) => sum + getTransactionHPP(t), 0);
+      const labaBersih = omzet - tax - hpp;
       const restockSpend = stockLogs
         .filter((l) => l.branchId === b.id && l.type === 'Restock Mandiri')
         .reduce((sum, l) => sum + (l.totalCost || 0), 0);
       return {
-        name: b.name.replace('Cabang ', ''),
+        name: (b.cafeName || b.name).replace('Cabang ', ''),
         Omzet: omzet,
+        LabaBersih: labaBersih,
         BelanjaStok: restockSpend,
         Transaksi: branchTrx.length
       };
     });
-  }, [branches, transactions, stockLogs]);
+  }, [branches, transactions, stockLogs, menus]);
 
   const paymentMethodPieData = useMemo(() => {
     const counts = { QRIS: 0, Tunai: 0, Debit: 0 };
@@ -2920,87 +3019,119 @@ export default function App() {
         {/* ==================== TAB 4: LAPORAN & MUTASI ==================== */}
         {activeTab === 'reports' && (
           <div className="space-y-6">
-            {/* Filter Bar */}
+            {/* Filter & Reset Action Bar */}
             <div className="bg-white p-4 rounded-2xl shadow-sm border border-stone-200 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="font-bold text-base text-stone-800">
-                  Laporan Transaksi, Laba Kotor & Riwayat Belanja Stok
+                  Laporan Transaksi, Laba Bersih & Riwayat Mutasi Stok
                 </h2>
                 <p className="text-xs text-stone-500">
-                  Pantau performa penjualan dan pengeluaran restock mandiri tiap cabang secara real-time.
+                  Pantau omzet, potongan HPP, laba bersih, serta reset riwayat laporan & mutasi per cabang atau keseluruhan.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
-                <Filter className="w-4 h-4 text-stone-400" />
-                <span className="text-xs font-semibold text-stone-600">Filter Cabang:</span>
-                <select
-                  value={reportBranchFilter}
-                  onChange={(e) => setReportBranchFilter(e.target.value)}
-                  disabled={role === 'cashier'}
-                  className="px-3 py-1.5 text-xs font-bold bg-stone-100 border border-stone-200 rounded-xl focus:outline-none"
-                >
-                  {role === 'owner' && <option value="ALL">Semua Cabang (Konsolidasi)</option>}
-                  {branches.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.name}
-                    </option>
-                  ))}
-                </select>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-2 bg-stone-100 px-3 py-1.5 rounded-xl border border-stone-200">
+                  <Filter className="w-4 h-4 text-stone-500" />
+                  <span className="text-xs font-semibold text-stone-600">Cabang:</span>
+                  <select
+                    value={reportBranchFilter}
+                    onChange={(e) => setReportBranchFilter(e.target.value)}
+                    disabled={role === 'cashier'}
+                    className="text-xs font-bold bg-transparent text-stone-900 focus:outline-none cursor-pointer"
+                  >
+                    {role === 'owner' && <option value="ALL">Semua Cabang (Konsolidasi)</option>}
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.cafeName || ''})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {role === 'owner' && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setResetReportModal({
+                        scope: reportBranchFilter,
+                        target: 'all'
+                      })
+                    }
+                    className="px-3.5 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-bold flex items-center gap-1.5 transition"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Reset Riwayat Laporan & Mutasi
+                  </button>
+                )}
               </div>
             </div>
 
-            {/* KPI Summary Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* KPI Summary Cards (5 Cards including Total HPP & Laba Bersih) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
               <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
                 <div className="flex items-center justify-between text-stone-400 mb-1">
-                  <span className="text-xs font-semibold uppercase">Total Omzet Penjualan</span>
-                  <DollarSign className="w-4 h-4 text-emerald-600" />
+                  <span className="text-[11px] font-bold uppercase">Total Omzet Kotor</span>
+                  <DollarSign className="w-4 h-4 text-amber-600" />
                 </div>
-                <p className="text-xl font-extrabold text-stone-900">
-                  {formatRp(filteredTransactions.reduce((acc, t) => acc + t.total, 0))}
-                </p>
-                <p className="text-[11px] text-emerald-600 font-medium mt-1">
-                  Dari {filteredTransactions.length} transaksi selesai
-                </p>
-              </div>
-
-              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
-                <div className="flex items-center justify-between text-stone-400 mb-1">
-                  <span className="text-xs font-semibold uppercase">Belanja Restock Cabang</span>
-                  <Package className="w-4 h-4 text-amber-600" />
-                </div>
-                <p className="text-xl font-extrabold text-stone-900">
-                  {formatRp(
-                    filteredStockLogs
-                      .filter((l) => l.type === 'Restock Mandiri')
-                      .reduce((acc, l) => acc + (l.totalCost || 0), 0)
-                  )}
+                <p className="text-lg font-extrabold text-stone-900">
+                  {formatRp(reportMetrics.totalOmzet)}
                 </p>
                 <p className="text-[11px] text-stone-500 mt-1">
-                  Total pembelian bahan baku mandiri
+                  {filteredTransactions.length} transaksi (Termasuk PB1{' '}
+                  {formatRp(reportMetrics.totalTax)})
                 </p>
               </div>
 
               <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
                 <div className="flex items-center justify-between text-stone-400 mb-1">
-                  <span className="text-xs font-semibold uppercase">Pajak PB1 Terkumpul</span>
-                  <Receipt className="w-4 h-4 text-blue-600" />
+                  <span className="text-[11px] font-bold uppercase">Total Modal HPP</span>
+                  <Layers className="w-4 h-4 text-rose-600" />
                 </div>
-                <p className="text-xl font-extrabold text-stone-900">
-                  {formatRp(filteredTransactions.reduce((acc, t) => acc + t.taxAmount, 0))}
+                <p className="text-lg font-extrabold text-stone-900">
+                  {formatRp(reportMetrics.totalHPP)}
                 </p>
-                <p className="text-[11px] text-stone-500 mt-1">Pajak restoran 10%</p>
-              </div>
-
-              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
-                <div className="flex items-center justify-between text-stone-400 mb-1">
-                  <span className="text-xs font-semibold uppercase">Aktivitas Mutasi Stok</span>
-                  <ClipboardList className="w-4 h-4 text-purple-600" />
-                </div>
-                <p className="text-xl font-extrabold text-stone-900">{filteredStockLogs.length}</p>
                 <p className="text-[11px] text-stone-500 mt-1">
-                  Catatan potong resep, restock & opname
+                  Akumulasi HPP dari menu terjual
+                </p>
+              </div>
+
+              <div className="bg-emerald-50/90 p-4 rounded-2xl border border-emerald-300 shadow-sm">
+                <div className="flex items-center justify-between text-emerald-800 mb-1">
+                  <span className="text-[11px] font-extrabold uppercase">Laba Bersih Penjualan</span>
+                  <TrendingUp className="w-4 h-4 text-emerald-600" />
+                </div>
+                <p className="text-xl font-extrabold text-emerald-800">
+                  {formatRp(reportMetrics.labaBersihPenjualan)}
+                </p>
+                <p className="text-[11px] text-emerald-700 font-semibold mt-1">
+                  Penjualan Bersih ({formatRp(reportMetrics.netRevenueExTax)}) - HPP
+                </p>
+              </div>
+
+              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
+                <div className="flex items-center justify-between text-stone-400 mb-1">
+                  <span className="text-[11px] font-bold uppercase">Belanja Restock Stok</span>
+                  <Package className="w-4 h-4 text-blue-600" />
+                </div>
+                <p className="text-lg font-extrabold text-stone-900">
+                  {formatRp(reportMetrics.totalRestockSpend)}
+                </p>
+                <p className="text-[11px] text-stone-500 mt-1">
+                  Pengeluaran belanja bahan cabang
+                </p>
+              </div>
+
+              <div className="bg-stone-900 text-white p-4 rounded-2xl border border-stone-800 shadow-sm">
+                <div className="flex items-center justify-between text-amber-300 mb-1">
+                  <span className="text-[11px] font-bold uppercase">Sisa Kas Bersih</span>
+                  <Receipt className="w-4 h-4 text-amber-400" />
+                </div>
+                <p className="text-lg font-extrabold text-amber-300">
+                  {formatRp(reportMetrics.kasBersihSetelahRestock)}
+                </p>
+                <p className="text-[11px] text-stone-400 mt-1">
+                  Omzet - HPP - Belanja Restock
                 </p>
               </div>
             </div>
@@ -3009,10 +3140,10 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
               <div className="lg:col-span-8 bg-white p-5 rounded-2xl border border-stone-200 shadow-sm">
                 <h3 className="font-bold text-sm text-stone-800 mb-1">
-                  Perbandingan Omzet vs Belanja Restock per Cabang
+                  Perbandingan Omzet, Laba Bersih & Belanja Restock per Cabang
                 </h3>
                 <p className="text-xs text-stone-500 mb-4">
-                  Memantau kemandirian kas setiap cabang kafe
+                  Pantau kontribusi laba bersih setiap cabang kafe secara langsung
                 </p>
                 <div className="relative h-72 w-full">
                   <ResponsiveContainer width="100%" height="100%">
@@ -3023,10 +3154,11 @@ export default function App() {
                       <Tooltip formatter={(val) => formatRp(val)} />
                       <Legend />
                       <Bar dataKey="Omzet" name="Omzet Penjualan" fill="#d97706" radius={[6, 6, 0, 0]} />
+                      <Bar dataKey="LabaBersih" name="Laba Bersih" fill="#059669" radius={[6, 6, 0, 0]} />
                       <Bar
                         dataKey="BelanjaStok"
-                        name="Belanja Restock Mandiri"
-                        fill="#059669"
+                        name="Belanja Restock"
+                        fill="#2563eb"
                         radius={[6, 6, 0, 0]}
                       />
                     </BarChart>
@@ -3065,9 +3197,27 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Transaction History */}
               <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
-                <div className="p-4 border-b border-stone-100 flex items-center justify-between">
-                  <h3 className="font-bold text-sm text-stone-800">Riwayat Transaksi Kasir</h3>
-                  <span className="text-xs text-stone-400">Klik struk untuk detail</span>
+                <div className="p-4 border-b border-stone-100 flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-stone-800">Riwayat Transaksi & Laba</h3>
+                    <span className="text-[11px] text-stone-400">
+                      Menampilkan Omzet, HPP & Laba Bersih per struk
+                    </span>
+                  </div>
+                  {role === 'owner' && filteredTransactions.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setResetReportModal({
+                          scope: reportBranchFilter,
+                          target: 'trx'
+                        })
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[11px] font-bold border border-red-200 flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3 h-3" /> Reset Transaksi
+                    </button>
+                  )}
                 </div>
                 <div className="overflow-x-auto max-h-96">
                   <table className="w-full text-left border-collapse text-xs">
@@ -3075,43 +3225,54 @@ export default function App() {
                       <tr className="bg-stone-50 text-stone-500 uppercase text-[11px] border-b border-stone-200">
                         <th className="py-2.5 px-3">ID / Waktu</th>
                         <th className="py-2.5 px-3">Cabang</th>
-                        <th className="py-2.5 px-3">Tipe / Metode</th>
-                        <th className="py-2.5 px-3 text-right">Total</th>
+                        <th className="py-2.5 px-3 text-right">Omzet</th>
+                        <th className="py-2.5 px-3 text-right">Laba Bersih</th>
                         <th className="py-2.5 px-3 text-right">Struk</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-stone-100">
-                      {filteredTransactions.map((t) => {
-                        const bName =
-                          branches.find((b) => b.id === t.branchId)?.name.replace('Cabang ', '') ||
-                          t.branchId;
-                        return (
-                          <tr key={t.id} className="hover:bg-stone-50">
-                            <td className="py-2.5 px-3">
-                              <p className="font-bold text-stone-800">{t.id}</p>
-                              <p className="text-[11px] text-stone-400">{t.timestamp}</p>
-                            </td>
-                            <td className="py-2.5 px-3 font-medium text-stone-700">{bName}</td>
-                            <td className="py-2.5 px-3">
-                              <span className="font-semibold text-stone-800">{t.orderType}</span>
-                              <p className="text-[11px] text-stone-500">
-                                {t.paymentMethod} • {t.customerName}
-                              </p>
-                            </td>
-                            <td className="py-2.5 px-3 text-right font-bold text-stone-900">
-                              {formatRp(t.total)}
-                            </td>
-                            <td className="py-2.5 px-3 text-right">
-                              <button
-                                onClick={() => setActiveReceipt(t)}
-                                className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold text-[11px]"
-                              >
-                                Lihat
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                      {filteredTransactions.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-8 text-center text-stone-400 text-xs">
+                            Belum ada riwayat transaksi pada filter ini.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredTransactions.map((t) => {
+                          const bName =
+                            branches
+                              .find((b) => b.id === t.branchId)
+                              ?.name.replace('Cabang ', '') || t.branchId;
+                          const trxHpp = getTransactionHPP(t);
+                          const trxLabaBersih = t.total - t.taxAmount - trxHpp;
+                          return (
+                            <tr key={t.id} className="hover:bg-stone-50">
+                              <td className="py-2.5 px-3">
+                                <p className="font-bold text-stone-800">{t.id}</p>
+                                <p className="text-[11px] text-stone-400">
+                                  {t.timestamp} • {t.paymentMethod}
+                                </p>
+                              </td>
+                              <td className="py-2.5 px-3 font-medium text-stone-700">{bName}</td>
+                              <td className="py-2.5 px-3 text-right">
+                                <p className="font-bold text-stone-900">{formatRp(t.total)}</p>
+                                <p className="text-[10px] text-stone-400">HPP: {formatRp(trxHpp)}</p>
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-extrabold text-emerald-700">
+                                +{formatRp(trxLabaBersih)}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <button
+                                  onClick={() => setActiveReceipt(t)}
+                                  className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold text-[11px]"
+                                >
+                                  Lihat
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -3119,11 +3280,29 @@ export default function App() {
 
               {/* Stock Logs */}
               <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
-                <div className="p-4 border-b border-stone-100 flex items-center justify-between">
-                  <h3 className="font-bold text-sm text-stone-800">
-                    Log Mutasi Stok & Belanja Bahan
-                  </h3>
-                  <span className="text-xs text-stone-400">Otomatis & Manual</span>
+                <div className="p-4 border-b border-stone-100 flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-stone-800">
+                      Log Mutasi Stok & Belanja Bahan
+                    </h3>
+                    <span className="text-[11px] text-stone-400">
+                      Riwayat belanja stok, transfer & opname cabang
+                    </span>
+                  </div>
+                  {role === 'owner' && filteredStockLogs.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setResetReportModal({
+                          scope: reportBranchFilter,
+                          target: 'logs'
+                        })
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[11px] font-bold border border-red-200 flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3 h-3" /> Reset Mutasi
+                    </button>
+                  )}
                 </div>
                 <div className="overflow-x-auto max-h-96">
                   <table className="w-full text-left border-collapse text-xs">
@@ -3135,41 +3314,49 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-stone-100">
-                      {filteredStockLogs.map((log) => {
-                        const bName =
-                          branches
-                            .find((b) => b.id === log.branchId)
-                            ?.name.replace('Cabang ', '') || log.branchId;
-                        const isPositive = log.qtyChange > 0;
-                        return (
-                          <tr key={log.id} className="hover:bg-stone-50">
-                            <td className="py-2.5 px-3">
-                              <p className="font-semibold text-stone-700">{bName}</p>
-                              <p className="text-[11px] text-stone-400">{log.timestamp}</p>
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <p className="font-bold text-stone-800">{log.ingredientName}</p>
-                              <p className="text-[11px] text-stone-500">
-                                <span className="font-semibold">{log.type}</span> — {log.note}
-                              </p>
-                            </td>
-                            <td className="py-2.5 px-3 text-right">
-                              <span
-                                className={`font-extrabold ${
-                                  isPositive ? 'text-emerald-600' : 'text-red-600'
-                                }`}
-                              >
-                                {isPositive ? `+${log.qtyChange}` : log.qtyChange} {log.unit}
-                              </span>
-                              {log.totalCost > 0 && (
+                      {filteredStockLogs.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="py-8 text-center text-stone-400 text-xs">
+                            Belum ada riwayat mutasi stok pada filter ini.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredStockLogs.map((log) => {
+                          const bName =
+                            branches
+                              .find((b) => b.id === log.branchId)
+                              ?.name.replace('Cabang ', '') || log.branchId;
+                          const isPositive = log.qtyChange > 0;
+                          return (
+                            <tr key={log.id} className="hover:bg-stone-50">
+                              <td className="py-2.5 px-3">
+                                <p className="font-semibold text-stone-700">{bName}</p>
+                                <p className="text-[11px] text-stone-400">{log.timestamp}</p>
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <p className="font-bold text-stone-800">{log.ingredientName}</p>
                                 <p className="text-[11px] text-stone-500">
-                                  Biaya: {formatRp(log.totalCost)}
+                                  <span className="font-semibold">{log.type}</span> — {log.note}
                                 </p>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <span
+                                  className={`font-extrabold ${
+                                    isPositive ? 'text-emerald-600' : 'text-red-600'
+                                  }`}
+                                >
+                                  {isPositive ? `+${log.qtyChange}` : log.qtyChange} {log.unit}
+                                </span>
+                                {log.totalCost > 0 && (
+                                  <p className="text-[11px] text-stone-500">
+                                    Biaya: {formatRp(log.totalCost)}
+                                  </p>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -3294,6 +3481,14 @@ export default function App() {
                         className="flex-1 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold transition"
                       >
                         Cek Stok
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteBranchModal(b)}
+                        className="p-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition"
+                        title="Hapus / Tutup Cabang Ini"
+                      >
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
                   </div>
@@ -4700,6 +4895,179 @@ export default function App() {
                 className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold"
               >
                 Selesai
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL 11: KONFIRMASI RESET RIWAYAT LAPORAN & MUTASI ==================== */}
+      {resetReportModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-stone-200 space-y-4">
+            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-red-50 text-red-600">
+                  <RefreshCw className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-stone-900">
+                    Reset Riwayat Laporan & Mutasi
+                  </h3>
+                  <p className="text-xs text-stone-500">
+                    Pilih cakupan cabang dan jenis riwayat yang ingin dibersihkan
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResetReportModal(null)}
+                className="text-stone-400 hover:text-stone-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-stone-700 mb-1">Cakupan Cabang</label>
+                <select
+                  value={resetReportModal.scope}
+                  onChange={(e) =>
+                    setResetReportModal({ ...resetReportModal, scope: e.target.value })
+                  }
+                  className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-bold text-stone-800"
+                >
+                  <option value="ALL">Semua Cabang (Bersihkan Seluruh Cabang)</option>
+                  {branches.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      Hanya {b.name} ({b.cafeName || ''})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-stone-700 mb-1">Data yang Di-reset</label>
+                <div className="space-y-2">
+                  {[
+                    {
+                      id: 'all',
+                      title: 'Semua Riwayat (Transaksi Kasir + Log Mutasi Stok)',
+                      desc: 'Mengembalikan omzet, laba bersih, dan riwayat mutasi ke 0 (Stok fisik bahan saat ini tetap aman)'
+                    },
+                    {
+                      id: 'trx',
+                      title: 'Hanya Riwayat Transaksi Penjualan Kasir',
+                      desc: 'Menghapus daftar struk penjualan & mereset perhitungan omzet/laba bersih'
+                    },
+                    {
+                      id: 'logs',
+                      title: 'Hanya Riwayat Log Mutasi & Belanja Stok',
+                      desc: 'Menghapus catatan log belanja stok, transfer, dan stok opname'
+                    }
+                  ].map((opt) => (
+                    <label
+                      key={opt.id}
+                      className={`block p-3 rounded-xl border cursor-pointer transition ${
+                        resetReportModal.target === opt.id
+                          ? 'bg-red-50/70 border-red-500 text-red-900'
+                          : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 font-bold">
+                        <input
+                          type="radio"
+                          name="resetTarget"
+                          checked={resetReportModal.target === opt.id}
+                          onChange={() =>
+                            setResetReportModal({ ...resetReportModal, target: opt.id })
+                          }
+                          className="text-red-600 focus:ring-red-500"
+                        />
+                        <span>{opt.title}</span>
+                      </div>
+                      <p className="text-[11px] text-stone-500 mt-1 pl-5">{opt.desc}</p>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-stone-100">
+              <button
+                type="button"
+                onClick={() => setResetReportModal(null)}
+                className="px-4 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmResetReports}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Ya, Reset Sekarang
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL 12: KONFIRMASI HAPUS / TUTUP CABANG ==================== */}
+      {deleteBranchModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-stone-200 space-y-4">
+            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-red-50 text-red-600">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-stone-900">
+                    Hapus / Tutup Cabang Kafe
+                  </h3>
+                  <p className="text-xs text-stone-500">
+                    Konfirmasi penutupan permanen cabang dari sistem
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteBranchModal(null)}
+                className="text-stone-400 hover:text-stone-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-900 space-y-1">
+                <p className="font-bold text-sm">
+                  {deleteBranchModal.cafeName || deleteBranchModal.name} ({deleteBranchModal.name})
+                </p>
+                <p className="text-[11px] text-red-700">{deleteBranchModal.address}</p>
+              </div>
+
+              <p className="text-stone-600 leading-relaxed">
+                Apakah Anda yakin ingin menghapus cabang ini? Seluruh data stok cabang, riwayat transaksi cabang, dan akun kasir khusus cabang ini akan ikut dihapus dari sistem.
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-stone-100">
+              <button
+                type="button"
+                onClick={() => setDeleteBranchModal(null)}
+                className="px-4 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteBranch}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Hapus Cabang Permanen
               </button>
             </div>
           </div>
