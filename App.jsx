@@ -139,44 +139,7 @@ const INITIAL_USERS = [
   }
 ];
 
-const INITIAL_LICENSES = [
-  {
-    id: 'lic-master',
-    code: 'RJPOS-MASTER-9999',
-    holderName: 'Owner / Admin Utama',
-    branchId: 'ALL',
-    status: 'active',
-    expiryDate: 'SEUMUR HIDUP',
-    createdAt: '2026-10-24'
-  },
-  {
-    id: 'lic-1',
-    code: 'RJPOS-SDA01-2026',
-    holderName: 'Perangkat Kasir Sidoarjo',
-    branchId: 'br-1',
-    status: 'active',
-    expiryDate: '2027-12-31',
-    createdAt: '2026-10-24'
-  },
-  {
-    id: 'lic-2',
-    code: 'RJPOS-SBY02-2026',
-    holderName: 'Perangkat Kasir Gubeng',
-    branchId: 'br-2',
-    status: 'active',
-    expiryDate: '2027-12-31',
-    createdAt: '2026-10-24'
-  },
-  {
-    id: 'lic-3',
-    code: 'RJPOS-MLG03-2026',
-    holderName: 'Perangkat Kasir Malang',
-    branchId: 'br-3',
-    status: 'active',
-    expiryDate: '2027-12-31',
-    createdAt: '2026-10-24'
-  }
-];
+
 
 const INITIAL_INGREDIENTS = [
   { id: 'ing-1', name: 'Biji Kopi Arabika Blend', unit: 'gr', minStock: 1000, costPerUnit: 250, category: 'Bahan Minuman' },
@@ -421,19 +384,7 @@ export default function App() {
   const [magicSyncText, setMagicSyncText] = useState('');
   const [isApplyingRemote, setIsApplyingRemote] = useState(false);
 
-  // --- LICENSE & DEVICE ACTIVATION STATE ---
-  const [licenses, setLicenses] = useState(INITIAL_LICENSES);
-  const [activatedLicenseCode, setActivatedLicenseCode] = useState('');
-  const [licenseInput, setLicenseInput] = useState('');
-  const [licenseError, setLicenseError] = useState('');
-  const [showLicenseGate, setShowLicenseGate] = useState(false);
-  const [newLicenseModal, setNewLicenseModal] = useState(false);
-  const [newLicenseForm, setNewLicenseForm] = useState({
-    code: '',
-    holderName: '',
-    branchId: 'ALL',
-    expiryDate: '2027-12-31'
-  });
+
 
   // --- AUTH & USER STATE ---
   const [users, setUsers] = useState(INITIAL_USERS);
@@ -990,157 +941,253 @@ export default function App() {
     if (Array.isArray(parsed.transactions)) setTransactions(parsed.transactions);
     if (Array.isArray(parsed.stockLogs)) setStockLogs(parsed.stockLogs);
     if (Array.isArray(parsed.users) && parsed.users.length > 0) setUsers(parsed.users);
-    if (Array.isArray(parsed.licenses)) setLicenses(parsed.licenses);
-    setTimeout(() => setIsApplyingRemote(false), 120);
+    setTimeout(() => setIsApplyingRemote(false), 150);
   };
 
-  // Load saved workspace config & local cache on startup or when workspaceId changes
+  // Load saved workspace config & local cache on startup
   useEffect(() => {
     try {
-      const savedCfg = localStorage.getItem('ramujaya_cloud_config_v1');
+      const params = new URLSearchParams(window.location.search);
+      const tokoParam = params.get('toko');
+      const dbParam = params.get('db');
+
+      const savedCfg = localStorage.getItem('ramujaya_cloud_config_v2');
       let activeWs = workspaceId;
+      let activeDb = cloudEndpoint;
+
       if (savedCfg) {
         const cfg = JSON.parse(savedCfg);
-        if (cfg.workspaceId) {
-          activeWs = cfg.workspaceId;
-          setWorkspaceId(cfg.workspaceId);
-        }
-        if (cfg.cloudEndpoint) setCloudEndpoint(cfg.cloudEndpoint);
+        if (cfg.workspaceId) activeWs = cfg.workspaceId;
+        if (cfg.cloudEndpoint) activeDb = cfg.cloudEndpoint;
         if (cfg.cloudSecret) setCloudSecret(cfg.cloudSecret);
       }
 
-      const storageKey = `ramujaya_ws_v3_${activeWs}`;
-      const saved = localStorage.getItem(storageKey) || localStorage.getItem('ramujaya_unified_portal_v3');
-      if (saved) {
-        applyWorkspaceSnapshot(JSON.parse(saved));
+      if (tokoParam) {
+        const cleanToko = tokoParam.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+        if (cleanToko) {
+          activeWs = cleanToko;
+          if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanToko)) {
+            const blobId = cleanToko.replace(/^RJ-/i, '');
+            activeDb = `https://jsonblob.com/api/jsonBlob/${blobId}`;
+          }
+        }
+      }
+      if (dbParam) {
+        activeDb = decodeURIComponent(dbParam).trim();
       }
 
-      const savedDeviceLic = localStorage.getItem('ramujaya_device_license_v1');
-      if (savedDeviceLic) {
-        setActivatedLicenseCode(savedDeviceLic);
+      setWorkspaceId(activeWs);
+      if (activeDb) setCloudEndpoint(activeDb);
+
+      localStorage.setItem(
+        'ramujaya_cloud_config_v2',
+        JSON.stringify({
+          workspaceId: activeWs,
+          cloudEndpoint: activeDb,
+          cloudSecret
+        })
+      );
+
+      const storageKey = `ramujaya_ws_v4_${activeWs}`;
+      const saved =
+        localStorage.getItem(storageKey) || localStorage.getItem('ramujaya_unified_portal_v3');
+      if (saved) {
+        applyWorkspaceSnapshot(JSON.parse(saved));
       }
     } catch (err) {
       // Ignore storage errors
     }
   }, []);
 
-  // Listen for real-time changes across browser tabs / windows on the same device
+  // Real-time BroadcastChannel & Storage listener across tabs/windows
   useEffect(() => {
-    const storageKey = `ramujaya_ws_v3_${workspaceId}`;
+    const storageKey = `ramujaya_ws_v4_${workspaceId}`;
     const handleStorageEvent = (e) => {
       if (e.key === storageKey && e.newValue) {
         try {
           applyWorkspaceSnapshot(JSON.parse(e.newValue));
           setLastSyncTime(new Date().toTimeString().slice(0, 8));
-        } catch (err) {
-          // ignore
-        }
+        } catch (err) {}
       }
     };
     window.addEventListener('storage', handleStorageEvent);
-    return () => window.removeEventListener('storage', handleStorageEvent);
-  }, [workspaceId]);
 
-  // Auto-read ?toko=KODE_TOKO from URL when cashier/client clicks a shared WhatsApp link
-  useEffect(() => {
+    let bc = null;
     try {
-      const params = new URLSearchParams(window.location.search);
-      const tokoParam = params.get('toko');
-      const dbParam = params.get('db');
-      if (tokoParam) {
-        const cleanToko = tokoParam.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
-        if (cleanToko) {
-          setWorkspaceId(cleanToko);
-          const nextCfg = {
-            workspaceId: cleanToko,
-            cloudEndpoint: dbParam ? decodeURIComponent(dbParam) : cloudEndpoint,
-            cloudSecret
-          };
-          if (dbParam) setCloudEndpoint( decodeURIComponent(dbParam) );
-          localStorage.setItem('ramujaya_cloud_config_v1', JSON.stringify(nextCfg));
-        }
+      if ('BroadcastChannel' in window) {
+        bc = new BroadcastChannel(`rjpos_channel_${workspaceId}`);
+        bc.onmessage = (ev) => {
+          if (ev.data && ev.data.branches) {
+            applyWorkspaceSnapshot(ev.data);
+            setLastSyncTime(new Date().toTimeString().slice(0, 8));
+          }
+        };
       }
     } catch (e) {}
-  }, []);
 
-  // Build clean URL for Cloud Database (Uses Custom Firebase URL if provided, or Built-In Zero-Config Cloud Relay automatically!)
-  const getCloudWorkspaceUrl = () => {
-    const cleanWs = workspaceId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'RAMUJAYA-PUSAT';
-    const base = cloudEndpoint.trim().replace(/\/+$/, '');
-    if (!base) {
-      // Built-in Zero-Config Cloud Storage Relay keyed by unique Workspace ID
-      return `https://kvdb.io/RamuJayaPosCloudV1_${cleanWs}/state`;
+    return () => {
+      window.removeEventListener('storage', handleStorageEvent);
+      if (bc) bc.close();
+    };
+  }, [workspaceId]);
+
+  const resolveCloudRoomUrl = (wsCode, customUrl) => {
+    const cleanWs = (wsCode || workspaceId || '').trim();
+    const base = (customUrl !== undefined ? customUrl : cloudEndpoint).trim().replace(/\/+$/, '');
+    if (base) {
+      if (base.includes('firebaseio.com') || base.includes('firebasedatabase.app')) {
+        const authParam = cloudSecret.trim() ? `?auth=${encodeURIComponent(cloudSecret.trim())}` : '';
+        return `${base}/ramujaya_workspaces/${cleanWs.toUpperCase().replace(/[^A-Z0-9_-]/g, '')}.json${authParam}`;
+      }
+      if (base.includes('jsonblob.com/api/jsonBlob/')) {
+        return base;
+      }
+      return `${base}/${cleanWs.toUpperCase()}`;
     }
-    if (base.includes('firebaseio.com') || base.includes('firebasedatabase.app')) {
-      const authParam = cloudSecret.trim() ? `?auth=${encodeURIComponent(cloudSecret.trim())}` : '';
-      return `${base}/ramujaya_workspaces/${cleanWs}.json${authParam}`;
+
+    // Check if the Kode Toko is an auto-provisioned Cloud Room Code (format: RJ-<blobId>)
+    if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
+      const blobId = cleanWs.replace(/^RJ-/i, '');
+      return `https://jsonblob.com/api/jsonBlob/${blobId}`;
     }
-    return `${base}/${cleanWs}`;
+    return '';
+  };
+
+  // Auto-provision a brand new Cloud Sync Kode Toko with 1 click (Zero external registration!)
+  const handleCreateAutoCloudCode = async () => {
+    try {
+      setCloudStatus('syncing');
+      const initialPayload = {
+        updatedAt: Date.now(),
+        workspaceId: 'PROVISIONING',
+        branches,
+        ingredients,
+        branchStocks,
+        menus,
+        transactions,
+        stockLogs,
+        users
+      };
+      const res = await fetch('https://jsonblob.com/api/jsonBlob', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
+        body: JSON.stringify(initialPayload)
+      });
+      const loc = res.headers.get('Location') || res.headers.get('location') || '';
+      const blobId = loc.split('/').pop();
+      if (!blobId) throw new Error('Cloud ID tidak ditemukan');
+
+      const newCloudCode = `RJ-${blobId}`;
+      const newUrl = `https://jsonblob.com/api/jsonBlob/${blobId}`;
+      setWorkspaceId(newCloudCode);
+      setCloudEndpoint(newUrl);
+      setCloudStatus('connected');
+      setLastSyncTime(new Date().toTimeString().slice(0, 8));
+      try {
+        localStorage.setItem(
+          'ramujaya_cloud_config_v2',
+          JSON.stringify({
+            workspaceId: newCloudCode,
+            cloudEndpoint: newUrl,
+            cloudSecret
+          })
+        );
+      } catch (e) {}
+      showToast(`Kode Cloud Baru (${newCloudCode}) aktif! Ketik kode ini di HP Kasir.`);
+    } catch (err) {
+      setCloudStatus('error');
+      showToast(
+        'Server otomatis sedang sibuk. Gunakan tombol Kirim Link WA atau Salin Data WA di bawah!',
+        'error'
+      );
+    }
   };
 
   // Pull latest data from Cloud Database (Multi-Device Sync: HP Admin <-> HP Kasir)
-  const pullFromCloud = async (silent = false) => {
-    const url = getCloudWorkspaceUrl();
-    if (!url) return;
+  const pullFromCloud = async (silent = false, overrideWs = null, overrideDb = null) => {
+    const url = resolveCloudRoomUrl(overrideWs || workspaceId, overrideDb !== null ? overrideDb : cloudEndpoint);
+    if (!url) {
+      if (!silent) {
+        showToast(
+          'Klik tombol hijau "Buat Kode Cloud Baru" dulu di HP Admin, atau gunakan Kirim Data WA!',
+          'error'
+        );
+      }
+      return;
+    }
     try {
       if (!silent) setCloudStatus('syncing');
-      const headers = {};
-      if (cloudSecret.trim() && !url.includes('firebase')) {
-        headers['X-Master-Key'] = cloudSecret.trim();
-        headers['Authorization'] = `Bearer ${cloudSecret.trim()}`;
-      }
-      const res = await fetch(url, { method: 'GET', headers });
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' }
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const payload = data?.record ? data.record : data;
-      if (payload && payload.branches) {
+      if (payload && Array.isArray(payload.branches)) {
         applyWorkspaceSnapshot(payload);
-        const storageKey = `ramujaya_ws_v3_${workspaceId}`;
+        const storageKey = `ramujaya_ws_v4_${overrideWs || workspaceId}`;
         try {
           localStorage.setItem(storageKey, JSON.stringify(payload));
         } catch (e) {}
+        setCloudStatus('connected');
+        setLastSyncTime(new Date().toTimeString().slice(0, 8));
+        if (!silent) showToast(`Berhasil terhubung & sinkron dengan Kode Toko (${overrideWs || workspaceId})!`);
+      } else if (!silent) {
+        await pushToCloud(
+          {
+            updatedAt: Date.now(),
+            workspaceId: overrideWs || workspaceId,
+            branches,
+            ingredients,
+            branchStocks,
+            menus,
+            transactions,
+            stockLogs,
+            users
+          },
+          false
+        );
       }
-      setCloudStatus('connected');
-      setLastSyncTime(new Date().toTimeString().slice(0, 8));
-      if (!silent) showToast(`Data Workspace "${workspaceId}" berhasil disinkronkan dari Cloud!`);
     } catch (err) {
       setCloudStatus('error');
       if (!silent) {
-        showToast(`Gagal menarik data Cloud: Pastikan URL Database Cloud benar.`, 'error');
+        showToast('Kode Cloud tidak ditemukan atau jaringan terputus. Cek kembali kodenya!', 'error');
       }
     }
   };
 
   // Push local changes to Cloud Database automatically & save to local storage
   const pushToCloud = async (snapshotPayload, silent = true) => {
-    const url = getCloudWorkspaceUrl();
+    const url = resolveCloudRoomUrl(workspaceId, cloudEndpoint);
     if (!url) {
       setCloudStatus('local');
       return;
     }
     try {
       setCloudStatus('syncing');
-      const headers = { 'Content-Type': 'application/json' };
-      if (cloudSecret.trim() && !url.includes('firebase')) {
-        headers['X-Master-Key'] = cloudSecret.trim();
-        headers['Authorization'] = `Bearer ${cloudSecret.trim()}`;
-      }
       const res = await fetch(url, {
         method: 'PUT',
-        headers,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
         body: JSON.stringify(snapshotPayload)
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setCloudStatus('connected');
       setLastSyncTime(new Date().toTimeString().slice(0, 8));
-      if (!silent) showToast(`Data berhasil di-upload ke Cloud (${workspaceId})!`);
+      if (!silent) showToast(`Data berhasil disinkronkan ke Cloud (${workspaceId})!`);
     } catch (err) {
       setCloudStatus('error');
-      if (!silent) showToast('Gagal mengirim data ke Cloud Database!', 'error');
+      if (!silent) showToast('Gagal mengirim data ke Cloud!', 'error');
     }
   };
 
-  // Auto-save to localStorage and push to Cloud when state changes
+  // Auto-save to localStorage, BroadcastChannel, and push to Cloud when state changes
   useEffect(() => {
     if (isApplyingRemote) return;
     const payload = {
@@ -1152,56 +1199,80 @@ export default function App() {
       menus,
       transactions,
       stockLogs,
-      users,
-      licenses
+      users
     };
     try {
-      const storageKey = `ramujaya_ws_v3_${workspaceId}`;
+      const storageKey = `ramujaya_ws_v4_${workspaceId}`;
       localStorage.setItem(storageKey, JSON.stringify(payload));
       localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(payload));
-    } catch (err) {
-      // Ignore storage errors
-    }
-    const timer = setTimeout(() => {
-      pushToCloud(payload, true);
-    }, 700);
-    return () => clearTimeout(timer);
-  }, [branches, ingredients, branchStocks, menus, transactions, stockLogs, users, licenses, workspaceId]);
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel(`rjpos_channel_${workspaceId}`);
+        bc.postMessage(payload);
+        bc.close();
+      }
+    } catch (err) {}
 
-  // Periodic background polling every 6 seconds automatically using Workspace ID so Admin HP sees Cashier HP transactions live
+    if (resolveCloudRoomUrl(workspaceId, cloudEndpoint)) {
+      const timer = setTimeout(() => {
+        pushToCloud(payload, true);
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [branches, ingredients, branchStocks, menus, transactions, stockLogs, users, workspaceId, cloudEndpoint]);
+
+  // Periodic background polling every 5 seconds when connected to a Cloud Kode Toko
   useEffect(() => {
+    if (!resolveCloudRoomUrl(workspaceId, cloudEndpoint)) return;
     pullFromCloud(true);
     const interval = setInterval(() => {
       pullFromCloud(true);
-    }, 6000);
+    }, 5000);
     return () => clearInterval(interval);
-  }, [cloudEndpoint, workspaceId, cloudSecret]);
+  }, [cloudEndpoint, workspaceId]);
 
-  const handleSaveCloudConfig = (e) => {
+  const handleSaveCloudConfig = async (e) => {
     e.preventDefault();
-    const cleanWs = workspaceId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'RAMUJAYA-PUSAT';
+    const cleanWs = workspaceId.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'RAMUJAYA-PUSAT';
     setWorkspaceId(cleanWs);
+
+    let nextEndpoint = cloudEndpoint.trim();
+    if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
+      const blobId = cleanWs.replace(/^RJ-/i, '');
+      nextEndpoint = `https://jsonblob.com/api/jsonBlob/${blobId}`;
+      setCloudEndpoint(nextEndpoint);
+    }
+
     try {
       localStorage.setItem(
-        'ramujaya_cloud_config_v1',
+        'ramujaya_cloud_config_v2',
         JSON.stringify({
           workspaceId: cleanWs,
-          cloudEndpoint: cloudEndpoint.trim(),
+          cloudEndpoint: nextEndpoint,
           cloudSecret: cloudSecret.trim()
         })
       );
     } catch (err) {}
-    setCloudModal(false);
-    pullFromCloud(false);
-    showToast(`Terhubung ke Kode Toko: ${cleanWs}! Semua HP dengan kode ini otomatis sinkron.`);
+
+    if (resolveCloudRoomUrl(cleanWs, nextEndpoint)) {
+      await pullFromCloud(false, cleanWs, nextEndpoint);
+      setCloudModal(false);
+    } else {
+      const storageKey = `ramujaya_ws_v4_${cleanWs}`;
+      const existingLocal = localStorage.getItem(storageKey);
+      if (existingLocal) {
+        applyWorkspaceSnapshot(JSON.parse(existingLocal));
+      }
+      setCloudModal(false);
+      showToast(`Ruang Toko diatur ke "${cleanWs}". Klik "Buat Kode Cloud Baru" jika ingin sinkron beda HP!`);
+    }
   };
 
   // Share 1-Click Invite Link for Cashier HP or New Cafe Owner
   const handleCopyInviteLink = () => {
-    const cleanWs = workspaceId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'RAMUJAYA-PUSAT';
+    const cleanWs = workspaceId.trim() || 'RAMUJAYA-PUSAT';
     const baseHref = window.location.origin + window.location.pathname;
     const dbQuery = cloudEndpoint.trim() ? `&db=${encodeURIComponent(cloudEndpoint.trim())}` : '';
-    const fullInviteUrl = `${baseHref}?toko=${cleanWs}${dbQuery}`;
+    const fullInviteUrl = `${baseHref}?toko=${encodeURIComponent(cleanWs)}${dbQuery}`;
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(fullInviteUrl);
@@ -1214,7 +1285,7 @@ export default function App() {
         document.body.removeChild(el);
       }
     } catch (e) {}
-    showToast(`Link Pintas Toko (${cleanWs}) disalin! Kirim ke WhatsApp HP Kasir.`);
+    showToast(`Link Koneksi Toko (${cleanWs}) berhasil disalin! Kirim ke WhatsApp HP Kasir.`);
   };
 
   // Generate compact Base64 Sync Code to paste via WhatsApp
@@ -1228,8 +1299,7 @@ export default function App() {
         menus,
         transactions,
         stockLogs,
-        users,
-        licenses
+        users
       };
       const codeStr = 'RJSYNC:' + btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
       if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1261,7 +1331,7 @@ export default function App() {
       if (parsed.workspaceId) setWorkspaceId(parsed.workspaceId);
       setMagicSyncText('');
       setCloudModal(false);
-      showToast('Data berhasil disinkronkan dari Kode WhatsApp!');
+      showToast('Seluruh data berhasil disinkronkan dari Kode WhatsApp!');
     } catch (err) {
       showToast('Kode sinkron tidak valid atau tidak lengkap!', 'error');
     }
@@ -1271,15 +1341,14 @@ export default function App() {
   const handleExportBackupJson = () => {
     const payload = {
       workspaceId,
-      exportedAt: '2026-11-04',
+      exportedAt: '2026-11-05',
       branches,
       ingredients,
       branchStocks,
       menus,
       transactions,
       stockLogs,
-      users,
-      licenses
+      users
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1320,9 +1389,7 @@ export default function App() {
         document.execCommand('copy');
         document.body.removeChild(el);
       }
-    } catch (e) {
-      // fallback
-    }
+    } catch (e) {}
     showToast(`Alamat situs tunggal (${fullUrl}) berhasil disalin!`);
   };
 
@@ -1335,144 +1402,6 @@ export default function App() {
       setReportBranchFilter(selectedBranchId);
     }
   }, [role, activeTab, selectedBranchId]);
-
-  // Check if current device has an active valid license
-  const activeDeviceLicenseObj = useMemo(() => {
-    if (!activatedLicenseCode) return null;
-    const found = licenses.find(
-      (l) => l.code.toUpperCase() === activatedLicenseCode.trim().toUpperCase()
-    );
-    if (!found || found.status !== 'active') return null;
-    if (
-      found.expiryDate &&
-      found.expiryDate !== 'SEUMUR HIDUP' &&
-      new Date(found.expiryDate) < new Date('2026-10-24')
-    ) {
-      return null;
-    }
-    return found;
-  }, [licenses, activatedLicenseCode]);
-
-  const generateRandomLicenseCode = () => {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    const seg1 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-    const seg2 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-    return `RJPOS-${seg1}-${seg2}`;
-  };
-
-  const handleActivateLicense = (e) => {
-    e.preventDefault();
-    const cleanCode = licenseInput.trim().toUpperCase();
-    const found = licenses.find((l) => l.code.toUpperCase() === cleanCode);
-    if (!found) {
-      setLicenseError('Kode Lisensi tidak terdaftar! Hubungi Admin Ramu Jaya POS.');
-      return;
-    }
-    if (found.status !== 'active') {
-      setLicenseError('Kode Lisensi ini sedang dinonaktifkan / diblokir oleh Admin!');
-      return;
-    }
-    if (
-      found.expiryDate &&
-      found.expiryDate !== 'SEUMUR HIDUP' &&
-      new Date(found.expiryDate) < new Date('2026-10-24')
-    ) {
-      setLicenseError(`Kode Lisensi telah habis masa aktifnya pada ${found.expiryDate}!`);
-      return;
-    }
-
-    setLicenseError('');
-    setActivatedLicenseCode(found.code);
-    setShowLicenseGate(false);
-    try {
-      localStorage.setItem('ramujaya_device_license_v1', found.code);
-    } catch (err) {
-      // ignore
-    }
-    showToast(`Perangkat berhasil diaktivasi dengan lisensi: ${found.holderName}`);
-  };
-
-  const handleDeactivateDeviceLicense = () => {
-    setActivatedLicenseCode('');
-    setLicenseInput('');
-    setCurrentUser(null);
-    setShowLicenseGate(true);
-    try {
-      localStorage.removeItem('ramujaya_device_license_v1');
-    } catch (err) {
-      // ignore
-    }
-    showToast('Lisensi perangkat dilepas. Silakan masukkan Kode Lisensi untuk memakai aplikasi.');
-  };
-
-  const handleCreateLicense = (e) => {
-    e.preventDefault();
-    const codeVal = (newLicenseForm.code.trim() || generateRandomLicenseCode()).toUpperCase();
-    if (!newLicenseForm.holderName.trim()) {
-      showToast('Nama pemegang / perangkat lisensi wajib diisi!', 'error');
-      return;
-    }
-    if (licenses.some((l) => l.code.toUpperCase() === codeVal)) {
-      showToast('Kode lisensi tersebut sudah ada!', 'error');
-      return;
-    }
-    const created = {
-      id: `lic-${Date.now()}`,
-      code: codeVal,
-      holderName: newLicenseForm.holderName.trim(),
-      branchId: newLicenseForm.branchId,
-      status: 'active',
-      expiryDate: newLicenseForm.expiryDate.trim() || 'SEUMUR HIDUP',
-      createdAt: '2026-10-28'
-    };
-    setLicenses([created, ...licenses]);
-    setNewLicenseModal(false);
-    setNewLicenseForm({
-      code: generateRandomLicenseCode(),
-      holderName: '',
-      branchId: 'ALL',
-      expiryDate: '2027-12-31'
-    });
-    showToast(`Kode Lisensi "${created.code}" berhasil dibuat!`);
-  };
-
-  const handleToggleLicenseStatus = (licId) => {
-    setLicenses(
-      licenses.map((l) => {
-        if (l.id !== licId) return l;
-        const nextStatus = l.status === 'active' ? 'suspended' : 'active';
-        return { ...l, status: nextStatus };
-      })
-    );
-    showToast('Status Kode Lisensi berhasil diperbarui!');
-  };
-
-  const handleDeleteLicense = (licId) => {
-    if (licenses.length <= 1) {
-      showToast('Minimal harus ada 1 kode lisensi utama di sistem!', 'error');
-      return;
-    }
-    setLicenses(licenses.filter((l) => l.id !== licId));
-    showToast('Kode Lisensi berhasil dihapus.');
-  };
-
-  const handleCopyLicenseCode = (codeStr) => {
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(codeStr);
-      } else {
-        const el = document.createElement('textarea');
-        el.value = codeStr;
-        document.body.appendChild(el);
-        el.select();
-        document.execCommand('copy');
-        document.body.removeChild(el);
-      }
-    } catch (e) {
-      // ignore
-    }
-    showToast(`Kode Lisensi ${codeStr} disalin ke clipboard!`);
-  };
 
   const handleLoginSubmit = (e) => {
     e.preventDefault();
@@ -2199,83 +2128,6 @@ export default function App() {
             </p>
           </div>
 
-          {/* Device License Status Bar on Login Screen */}
-          <div className="bg-stone-900/90 border border-stone-700 rounded-2xl p-3 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <ShieldCheck
-                className={`w-4 h-4 shrink-0 ${
-                  activeDeviceLicenseObj ? 'text-emerald-400' : 'text-amber-400'
-                }`}
-              />
-              <div className="min-w-0">
-                <p className="text-[11px] font-bold text-stone-200 truncate">
-                  {activeDeviceLicenseObj
-                    ? `Lisensi Aktif: ${activeDeviceLicenseObj.holderName}`
-                    : 'Mode Lisensi Perangkat Tersedia'}
-                </p>
-                <p className="text-[10px] text-stone-400 font-mono truncate">
-                  {activeDeviceLicenseObj
-                    ? `${activeDeviceLicenseObj.code} (s/d ${activeDeviceLicenseObj.expiryDate})`
-                    : 'Klik tombol di kanan untuk aktivasi / kunci dengan Kode Lisensi'}
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowLicenseGate(!showLicenseGate)}
-              className="px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[11px] font-bold shrink-0 transition"
-            >
-              {showLicenseGate
-                ? 'Ke Login Kasir'
-                : activeDeviceLicenseObj
-                ? 'Ganti Lisensi'
-                : 'Input Kode Lisensi'}
-            </button>
-          </div>
-
-          {showLicenseGate ? (
-            <div className="space-y-4 bg-stone-900/60 p-4 rounded-2xl border border-amber-500/30">
-              <div className="flex items-center gap-2">
-                <Lock className="w-4 h-4 text-amber-400" />
-                <h2 className="text-sm font-bold text-amber-300 uppercase tracking-wider">
-                  Aktivasi Kode Lisensi Aplikasi
-                </h2>
-              </div>
-              <p className="text-xs text-stone-400 leading-relaxed">
-                Setiap perangkat Android / Desktop pengguna wajib memasukkan <strong>Kode Lisensi Resmi</strong> yang diberikan oleh Owner / Admin Ramu Jaya POS.
-              </p>
-
-              {licenseError && (
-                <div className="p-3 rounded-xl bg-red-500/20 border border-red-500/40 text-red-200 text-xs flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
-                  <span>{licenseError}</span>
-                </div>
-              )}
-
-              <form onSubmit={handleActivateLicense} className="space-y-3">
-                <div>
-                  <label className="block text-xs font-bold text-stone-300 mb-1.5">
-                    Masukkan Kode Lisensi (Serial Key)
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={licenseInput}
-                    onChange={(e) => setLicenseInput(e.target.value.toUpperCase())}
-                    placeholder="Contoh: RJPOS-SDA01-2026"
-                    className="w-full px-3.5 py-2.5 text-sm bg-stone-950 border border-stone-700 rounded-xl text-amber-300 placeholder-stone-600 font-mono font-bold tracking-wider uppercase focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg transition flex items-center justify-center gap-2"
-                >
-                  <CheckCircle2 className="w-4 h-4" /> Verifikasi & Aktifkan Perangkat Ini
-                </button>
-              </form>
-            </div>
-          ) : null}
-
           {/* Login Form */}
           <div>
             <div className="flex items-center gap-2 mb-4">
@@ -2425,10 +2277,10 @@ export default function App() {
                   </div>
                   <div>
                     <h3 className="font-bold text-base text-stone-900">
-                      Sinkron Antar-HP Super Mudah (1 Kode)
+                      Hubungkan HP Admin & HP Kasir
                     </h3>
                     <p className="text-xs text-stone-500">
-                      Tanpa daftar akun rumit — cukup samakan Kode Toko!
+                      Sinkronisasi otomatis antar perangkat & pemisah kafe
                     </p>
                   </div>
                 </div>
@@ -2442,34 +2294,38 @@ export default function App() {
               </div>
 
               <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
-                {/* LANGKAH TUNGGAL: KODE TOKO */}
-                <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <label className="font-extrabold text-amber-950 text-sm">
-                      Ketik Kode Unik Kafe Anda:
-                    </label>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
-                      Otomatis Sinkron
+                {/* STEP 1: BUAT ATAU MASUKKAN KODE CLOUD TOKO */}
+                <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-extrabold text-amber-950 text-xs">
+                      1. Di HP Admin (Pertama Kali):
                     </span>
+                    <button
+                      type="button"
+                      onClick={handleCreateAutoCloudCode}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shadow-sm transition flex items-center gap-1"
+                    >
+                      <Cloud className="w-3.5 h-3.5" /> Buat Kode Cloud Baru
+                    </button>
                   </div>
 
-                  <input
-                    type="text"
-                    required
-                    value={workspaceId}
-                    onChange={(e) => setWorkspaceId(e.target.value.toUpperCase())}
-                    placeholder="Contoh: RAMUJAYA-01"
-                    className="w-full px-3.5 py-3 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-base text-stone-900 uppercase tracking-wider text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  />
+                  <div className="border-t border-amber-200/80 pt-2.5 space-y-1.5">
+                    <label className="block font-extrabold text-amber-950 text-xs">
+                      2. Kode Toko Cloud Aktif (Ketik Kode Ini di HP Kasir):
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={workspaceId}
+                      onChange={(e) => setWorkspaceId(e.target.value)}
+                      placeholder="Klik Buat Kode Cloud Baru di atas..."
+                      className="w-full px-3 py-2.5 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-sm text-stone-900 text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                  </div>
 
                   <div className="bg-white/90 p-2.5 rounded-xl border border-amber-200 text-[11px] text-stone-700 space-y-1 leading-relaxed">
                     <p>
-                      ✅ <strong>Cara Pakai untuk HP Admin & HP Kasir Anda:</strong><br />
-                      Cukup ketik Kode yang <strong>SAMA</strong> (misal: <code>RAMUJAYA-01</code>) di HP Admin dan di HP Kasir, lalu klik <strong>Hubungkan Sekarang</strong>.
-                    </p>
-                    <p>
-                      ✅ <strong>Cara Pakai Jika Ada Kafe / Orang Lain Mau Pakai:</strong><br />
-                      Suruh mereka mengetik Kode nama kafe mereka sendiri (misal: <code>KOPI-BINTANG</code>). Otomatis seluruh menu, stok, dan laporan mereka terpisah sendiri!
+                      💡 <strong>Kenapa sebelumnya belum nyambung?</strong> Karena nama teks biasa hanya tersimpan di HP masing-masing. Klik tombol hijau <strong>"Buat Kode Cloud Baru"</strong> di atas agar sistem membuatkan <strong>Kode Server Cloud (<code>RJ-...</code>)</strong>, lalu klik <strong>Kirim Link WA</strong> ke HP Kasir!
                     </p>
                   </div>
 
@@ -2491,21 +2347,21 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* ALTERNATIF: SALIN & TEMPEL KODE DATA VIA WHATSAPP (100% PASTI BISA TANPA SERVER) */}
+                {/* CARA PALING PASTI (TANPA SERVER): SALIN & TEMPEL VIA WHATSAPP */}
                 <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-2.5">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <div>
                       <p className="font-bold text-stone-800">
-                        Sinkron Instan via Chat WhatsApp (Salin & Tempel)
+                        Cara Alternatif: Kirim Data via Chat WhatsApp
                       </p>
                       <p className="text-[11px] text-stone-500">
-                        Kirim seluruh data menu, stok & transaksi ke HP lain lewat pesan WA:
+                        100% berhasil di semua jaringan HP tanpa perlu server:
                       </p>
                     </div>
                     <button
                       type="button"
                       onClick={handleCopyWhatsAppSyncCode}
-                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 shrink-0"
+                      className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-[11px] flex items-center gap-1 shrink-0"
                     >
                       <Copy className="w-3.5 h-3.5" /> 1. Salin Data HP Ini
                     </button>
@@ -2522,14 +2378,14 @@ export default function App() {
                     <button
                       type="button"
                       onClick={handleApplyWhatsAppSyncCode}
-                      className="px-3 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-[11px] shrink-0"
+                      className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shrink-0"
                     >
                       Terapkan
                     </button>
                   </div>
                 </div>
 
-                {/* OPSI LANJUTAN (DISEMBUNYIKAN AGAR TIDAK MEMBINGUNGKAN) */}
+                {/* OPSI LANJUTAN */}
                 <div className="pt-1 border-t border-stone-100">
                   <button
                     type="button"
@@ -2538,21 +2394,21 @@ export default function App() {
                   >
                     <Settings className="w-3 h-3" />
                     {showAdvancedCloud
-                      ? 'Sembunyikan Pengaturan Server Pribadi'
-                      : 'Pengaturan Lanjutan (Opsional: Server Firebase / Backup File)'}
+                      ? 'Sembunyikan Pengaturan Lanjutan'
+                      : 'Pengaturan Lanjutan (Backup File JSON / Firebase)'}
                   </button>
 
                   {showAdvancedCloud && (
                     <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
                       <div>
                         <label className="block font-bold text-stone-700 mb-1">
-                          URL Server Firebase Pribadi (Kosongkan jika pakai Server Otomatis)
+                          URL Database Cloud / Firebase (Terisi Otomatis Saat Buat Kode Cloud)
                         </label>
                         <input
                           type="url"
                           value={cloudEndpoint}
                           onChange={(e) => setCloudEndpoint(e.target.value)}
-                          placeholder="Opsional: https://...firebasedatabase.app"
+                          placeholder="https://..."
                           className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-[11px]"
                         />
                       </div>
@@ -3612,912 +3468,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Manajemen Kode Lisensi Pengguna (Serial Key APK Android / Desktop) */}
-            <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden mt-6">
-              <div className="p-5 border-b border-stone-100 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-bold text-base text-stone-800">
-                      Generator & Manajemen Kode Lisensi Aplikasi (Serial Key)
-                    </h3>
-                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                      Proteksi APK & Web
-                    </span>
-                  </div>
-                  <p className="text-xs text-stone-500 mt-0.5">
-                    Buat dan bagikan Kode Lisensi unik untuk setiap orang/perangkat yang memakai aplikasi Android Anda. Anda dapat mencabut/memblokir akses kapan saja.
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleDeactivateDeviceLicense}
-                    className="px-3 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold flex items-center gap-1.5 transition"
-                    title="Uji Tampilan Kunci Lisensi di Perangkat Ini"
-                  >
-                    <Lock className="w-3.5 h-3.5" /> Uji Kunci Lisensi
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setNewLicenseForm({
-                        code: generateRandomLicenseCode(),
-                        holderName: '',
-                        branchId: 'ALL',
-                        expiryDate: '2027-12-31'
-                      });
-                      setNewLicenseModal(true);
-                    }}
-                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
-                  >
-                    <KeyRound className="w-4 h-4" /> + Buat Kode Lisensi Baru
-                  </button>
-                </div>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-stone-100/80 text-stone-600 uppercase text-[11px] font-bold border-b border-stone-200">
-                      <th className="py-3 px-4">Kode Lisensi (Serial Key)</th>
-                      <th className="py-3 px-4">Nama Pemegang / Perangkat</th>
-                      <th className="py-3 px-4">Cakupan Cabang</th>
-                      <th className="py-3 px-4">Masa Berlaku</th>
-                      <th className="py-3 px-4">Status Lisensi</th>
-                      <th className="py-3 px-4 text-right">Aksi Admin</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-100">
-                    {licenses.map((lic) => {
-                      const isActive = lic.status === 'active';
-                      const bName =
-                        lic.branchId === 'ALL'
-                          ? 'Semua Cabang'
-                          : branches.find((b) => b.id === lic.branchId)?.name || lic.branchId;
-                      return (
-                        <tr key={lic.id} className="hover:bg-stone-50">
-                          <td className="py-3 px-4">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-extrabold text-stone-900 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
-                                {lic.code}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => handleCopyLicenseCode(lic.code)}
-                                className="p-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600"
-                                title="Salin Kode Lisensi"
-                              >
-                                <Copy className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </td>
-                          <td className="py-3 px-4 font-bold text-stone-800">
-                            {lic.holderName}
-                            <p className="text-[10px] text-stone-400 font-normal">
-                              Dibuat: {lic.createdAt}
-                            </p>
-                          </td>
-                          <td className="py-3 px-4 font-medium text-stone-700">{bName}</td>
-                          <td className="py-3 px-4 font-mono text-stone-700">{lic.expiryDate}</td>
-                          <td className="py-3 px-4">
-                            {isActive ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                <CheckCircle2 className="w-3 h-3" /> Aktif Diizinkan
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-red-50 text-red-600 border border-red-200">
-                                <Lock className="w-3 h-3" /> Diblokir / Nonaktif
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4 text-right">
-                            <div className="flex items-center justify-end gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => handleToggleLicenseStatus(lic.id)}
-                                className={`px-2.5 py-1 rounded-lg font-bold text-[11px] border transition ${
-                                  isActive
-                                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
-                                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
-                                }`}
-                              >
-                                {isActive ? 'Blokir' : 'Aktifkan'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteLicense(lic.id)}
-                                className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 font-semibold text-[11px]"
-                              >
-                                Hapus
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ==================== TAB 3: MENU & RESEP (MANUAL HPP & HARGA JUAL) ==================== */}
-        {activeTab === 'recipes' && role === 'owner' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Left List of Menus (5 cols) */}
-            <div className="lg:col-span-5 bg-white rounded-2xl shadow-sm border border-stone-200 p-4 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="font-bold text-base text-stone-800">Daftar Menu & HPP</h2>
-                  <p className="text-xs text-stone-500">
-                    Pilih menu untuk mengubah HPP & Harga Jual secara manual
-                  </p>
-                </div>
-                <button
-                  onClick={() => setNewMenuModal(true)}
-                  className="px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1 shadow-sm"
-                >
-                  <Plus className="w-3.5 h-3.5" /> Menu Baru
-                </button>
-              </div>
-
-              <div className="space-y-2">
-                {menus.map((m) => {
-                  const hpp = calculateMenuHPP(m);
-                  const margin = m.price - hpp;
-                  const marginPct = m.price > 0 ? Math.round((margin / m.price) * 100) : 0;
-
-                  return (
-                    <div
-                      key={m.id}
-                      onClick={() => setSelectedMenuForRecipe(m.id)}
-                      className={`p-3.5 rounded-xl border cursor-pointer transition flex items-center justify-between ${
-                        selectedMenuForRecipe === m.id
-                          ? 'bg-amber-50/70 border-amber-600 shadow-sm'
-                          : 'bg-white border-stone-200 hover:bg-stone-50'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="p-2 rounded-lg bg-stone-100">{renderMenuIcon(m.icon)}</div>
-                        <div>
-                          <p className="font-bold text-sm text-stone-800">{m.name}</p>
-                          <p className="text-xs text-stone-500">
-                            Harga Jual: <strong className="text-stone-800">{formatRp(m.price)}</strong> •{' '}
-                            {m.category}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
-                          Margin {marginPct}%
-                        </span>
-                        <p className="text-[11px] text-stone-500 mt-1">HPP: {formatRp(hpp)}</p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Right Manual Editor for HPP & Harga Jual (7 cols) */}
-            {activeMenuRecipeObj && (
-              <div className="lg:col-span-7 bg-white rounded-2xl shadow-sm border border-stone-200 p-5 space-y-5">
-                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-stone-100 pb-4">
-                  <div>
-                    <span className="text-xs font-bold uppercase tracking-wider text-amber-700">
-                      Pengaturan Harga & HPP Manual (Tanpa Komposisi)
-                    </span>
-                    <h3 className="text-xl font-extrabold text-stone-900 mt-0.5">
-                      {activeMenuRecipeObj.name}
-                    </h3>
-                    <p className="text-xs text-stone-500 mt-0.5">
-                      Masukkan nilai HPP (Harga Pokok Penjualan) dan Harga Jual secara langsung tanpa rincian komposisi bahan.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteMenu(activeMenuRecipeObj.id)}
-                    className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold flex items-center gap-1.5 border border-red-200 transition"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" /> Hapus Menu
-                  </button>
-                </div>
-
-                {/* Form Input Manual */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold text-stone-700 mb-1.5">
-                      Nama Menu
-                    </label>
-                    <input
-                      type="text"
-                      value={activeMenuRecipeObj.name}
-                      onChange={(e) =>
-                        handleUpdateMenuField(activeMenuRecipeObj.id, 'name', e.target.value)
-                      }
-                      className="w-full px-3.5 py-2.5 text-sm font-semibold bg-stone-50 border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-stone-700 mb-1.5">
-                      Kategori Menu
-                    </label>
-                    <select
-                      value={activeMenuRecipeObj.category}
-                      onChange={(e) =>
-                        handleUpdateMenuField(activeMenuRecipeObj.id, 'category', e.target.value)
-                      }
-                      className="w-full px-3.5 py-2.5 text-sm font-semibold bg-stone-50 border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500"
-                    >
-                      <option value="Kopi">Kopi</option>
-                      <option value="Non-Kopi">Non-Kopi</option>
-                      <option value="Pastry & Snack">Pastry & Snack</option>
-                      <option value="Makanan Berat">Makanan Berat</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-stone-700 mb-1.5">
-                      HPP Manual per Porsi (Rp)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={activeMenuRecipeObj.hpp}
-                      onChange={(e) =>
-                        handleUpdateMenuField(activeMenuRecipeObj.id, 'hpp', e.target.value)
-                      }
-                      placeholder="Masukkan HPP..."
-                      className="w-full px-3.5 py-2.5 text-sm font-extrabold bg-stone-50 border border-stone-300 rounded-xl text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
-                    />
-                    <p className="text-[11px] text-stone-400 mt-1">
-                      Modal pokok per porsi yang diinput secara manual.
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-stone-700 mb-1.5">
-                      Harga Jual Kasir (Rp)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={activeMenuRecipeObj.price}
-                      onChange={(e) =>
-                        handleUpdateMenuField(activeMenuRecipeObj.id, 'price', e.target.value)
-                      }
-                      placeholder="Masukkan Harga Jual..."
-                      className="w-full px-3.5 py-2.5 text-sm font-extrabold bg-amber-50/60 border border-amber-300 rounded-xl text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
-                    />
-                    <p className="text-[11px] text-stone-400 mt-1">
-                      Harga yang tampil pada halaman Kasir (POS) di semua cabang.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Ringkasan Laba Kotor & Margin */}
-                <div className="bg-stone-50 p-4 rounded-2xl border border-stone-200 grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div className="p-3 bg-white rounded-xl border border-stone-200/80">
-                    <span className="text-[11px] text-stone-500 block">HPP Manual</span>
-                    <span className="text-base font-extrabold text-stone-800">
-                      {formatRp(activeMenuRecipeObj.hpp)}
-                    </span>
-                  </div>
-                  <div className="p-3 bg-white rounded-xl border border-stone-200/80">
-                    <span className="text-[11px] text-stone-500 block">Harga Jual</span>
-                    <span className="text-base font-extrabold text-amber-700">
-                      {formatRp(activeMenuRecipeObj.price)}
-                    </span>
-                  </div>
-                  <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-                    <span className="text-[11px] text-emerald-700 font-semibold block">
-                      Estimasi Laba Kotor / Porsi
-                    </span>
-                    <span className="text-base font-extrabold text-emerald-800">
-                      {formatRp(activeMenuRecipeObj.price - activeMenuRecipeObj.hpp)}{' '}
-                      <span className="text-xs font-bold">
-                        (
-                        {activeMenuRecipeObj.price > 0
-                          ? Math.round(
-                              ((activeMenuRecipeObj.price - activeMenuRecipeObj.hpp) /
-                                activeMenuRecipeObj.price) *
-                                100
-                            )
-                          : 0}
-                        %)
-                      </span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ==================== TAB 4: LAPORAN & MUTASI ==================== */}
-        {activeTab === 'reports' && (
-          <div className="space-y-6">
-            {/* Filter & Reset Action Bar */}
-            <div className="bg-white p-4 rounded-2xl shadow-sm border border-stone-200 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="font-bold text-base text-stone-800">
-                  Laporan Transaksi, Laba Bersih & Riwayat Mutasi Stok
-                </h2>
-                <p className="text-xs text-stone-500">
-                  Pantau omzet, potongan HPP, laba bersih, serta reset riwayat laporan & mutasi per cabang atau keseluruhan.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="flex items-center gap-2 bg-stone-100 px-3 py-1.5 rounded-xl border border-stone-200">
-                  <Filter className="w-4 h-4 text-stone-500" />
-                  <span className="text-xs font-semibold text-stone-600">Cabang:</span>
-                  <select
-                    value={reportBranchFilter}
-                    onChange={(e) => setReportBranchFilter(e.target.value)}
-                    disabled={role === 'cashier'}
-                    className="text-xs font-bold bg-transparent text-stone-900 focus:outline-none cursor-pointer"
-                  >
-                    {role === 'owner' && <option value="ALL">Semua Cabang (Konsolidasi)</option>}
-                    {branches.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name} ({b.cafeName || ''})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {role === 'owner' && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setResetReportModal({
-                        scope: reportBranchFilter,
-                        target: 'all'
-                      })
-                    }
-                    className="px-3.5 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-bold flex items-center gap-1.5 transition"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    Reset Riwayat Laporan & Mutasi
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* KPI Summary Cards (5 Cards including Total HPP & Laba Bersih) */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
-                <div className="flex items-center justify-between text-stone-400 mb-1">
-                  <span className="text-[11px] font-bold uppercase">Total Omzet Kotor</span>
-                  <DollarSign className="w-4 h-4 text-amber-600" />
-                </div>
-                <p className="text-lg font-extrabold text-stone-900">
-                  {formatRp(reportMetrics.totalOmzet)}
-                </p>
-                <p className="text-[11px] text-stone-500 mt-1">
-                  {filteredTransactions.length} transaksi (Termasuk PB1{' '}
-                  {formatRp(reportMetrics.totalTax)})
-                </p>
-              </div>
-
-              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
-                <div className="flex items-center justify-between text-stone-400 mb-1">
-                  <span className="text-[11px] font-bold uppercase">Total Modal HPP</span>
-                  <Layers className="w-4 h-4 text-rose-600" />
-                </div>
-                <p className="text-lg font-extrabold text-stone-900">
-                  {formatRp(reportMetrics.totalHPP)}
-                </p>
-                <p className="text-[11px] text-stone-500 mt-1">
-                  Akumulasi HPP dari menu terjual
-                </p>
-              </div>
-
-              <div className="bg-emerald-50/90 p-4 rounded-2xl border border-emerald-300 shadow-sm">
-                <div className="flex items-center justify-between text-emerald-800 mb-1">
-                  <span className="text-[11px] font-extrabold uppercase">Laba Bersih Penjualan</span>
-                  <TrendingUp className="w-4 h-4 text-emerald-600" />
-                </div>
-                <p className="text-xl font-extrabold text-emerald-800">
-                  {formatRp(reportMetrics.labaBersihPenjualan)}
-                </p>
-                <p className="text-[11px] text-emerald-700 font-semibold mt-1">
-                  Penjualan Bersih ({formatRp(reportMetrics.netRevenueExTax)}) - HPP
-                </p>
-              </div>
-
-              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
-                <div className="flex items-center justify-between text-stone-400 mb-1">
-                  <span className="text-[11px] font-bold uppercase">Belanja Restock Stok</span>
-                  <Package className="w-4 h-4 text-blue-600" />
-                </div>
-                <p className="text-lg font-extrabold text-stone-900">
-                  {formatRp(reportMetrics.totalRestockSpend)}
-                </p>
-                <p className="text-[11px] text-stone-500 mt-1">
-                  Pengeluaran belanja bahan cabang
-                </p>
-              </div>
-
-              <div className="bg-stone-900 text-white p-4 rounded-2xl border border-stone-800 shadow-sm">
-                <div className="flex items-center justify-between text-amber-300 mb-1">
-                  <span className="text-[11px] font-bold uppercase">Sisa Kas Bersih</span>
-                  <Receipt className="w-4 h-4 text-amber-400" />
-                </div>
-                <p className="text-lg font-extrabold text-amber-300">
-                  {formatRp(reportMetrics.kasBersihSetelahRestock)}
-                </p>
-                <p className="text-[11px] text-stone-400 mt-1">
-                  Omzet - HPP - Belanja Restock
-                </p>
-              </div>
-            </div>
-
-            {/* Charts Section */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              <div className="lg:col-span-8 bg-white p-5 rounded-2xl border border-stone-200 shadow-sm">
-                <h3 className="font-bold text-sm text-stone-800 mb-1">
-                  Perbandingan Omzet, Laba Bersih & Belanja Restock per Cabang
-                </h3>
-                <p className="text-xs text-stone-500 mb-4">
-                  Pantau kontribusi laba bersih setiap cabang kafe secara langsung
-                </p>
-                <div className="relative h-72 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={branchComparisonData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
-                      <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-                      <YAxis tick={{ fontSize: 11 }} />
-                      <Tooltip formatter={(val) => formatRp(val)} />
-                      <Legend />
-                      <Bar dataKey="Omzet" name="Omzet Penjualan" fill="#d97706" radius={[6, 6, 0, 0]} />
-                      <Bar dataKey="LabaBersih" name="Laba Bersih" fill="#059669" radius={[6, 6, 0, 0]} />
-                      <Bar
-                        dataKey="BelanjaStok"
-                        name="Belanja Restock"
-                        fill="#2563eb"
-                        radius={[6, 6, 0, 0]}
-                      />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              <div className="lg:col-span-4 bg-white p-5 rounded-2xl border border-stone-200 shadow-sm">
-                <h3 className="font-bold text-sm text-stone-800 mb-1">Metode Pembayaran</h3>
-                <p className="text-xs text-stone-500 mb-4">Proporsi Tunai, QRIS, dan Debit</p>
-                <div className="relative h-72 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={paymentMethodPieData}
-                        dataKey="value"
-                        nameKey="name"
-                        cx="50%"
-                        cy="50%"
-                        outerRadius={80}
-                        label={({ name }) => name}
-                      >
-                        {paymentMethodPieData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(val) => formatRp(val)} />
-                      <Legend />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            </div>
-
-            {/* Dual Tables: Transaction History & Stock Mutation Log */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Transaction History */}
-              <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
-                <div className="p-4 border-b border-stone-100 flex items-center justify-between gap-2">
-                  <div>
-                    <h3 className="font-bold text-sm text-stone-800">Riwayat Transaksi & Laba</h3>
-                    <span className="text-[11px] text-stone-400">
-                      Menampilkan Omzet, HPP & Laba Bersih per struk
-                    </span>
-                  </div>
-                  {role === 'owner' && filteredTransactions.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setResetReportModal({
-                          scope: reportBranchFilter,
-                          target: 'trx'
-                        })
-                      }
-                      className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[11px] font-bold border border-red-200 flex items-center gap-1"
-                    >
-                      <Trash2 className="w-3 h-3" /> Reset Transaksi
-                    </button>
-                  )}
-                </div>
-                <div className="overflow-x-auto max-h-96">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-stone-50 text-stone-500 uppercase text-[11px] border-b border-stone-200">
-                        <th className="py-2.5 px-3">ID / Waktu</th>
-                        <th className="py-2.5 px-3">Cabang</th>
-                        <th className="py-2.5 px-3 text-right">Omzet</th>
-                        <th className="py-2.5 px-3 text-right">Laba Bersih</th>
-                        <th className="py-2.5 px-3 text-right">Struk</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-stone-100">
-                      {filteredTransactions.length === 0 ? (
-                        <tr>
-                          <td colSpan={5} className="py-8 text-center text-stone-400 text-xs">
-                            Belum ada riwayat transaksi pada filter ini.
-                          </td>
-                        </tr>
-                      ) : (
-                        filteredTransactions.map((t) => {
-                          const bName =
-                            branches
-                              .find((b) => b.id === t.branchId)
-                              ?.name.replace('Cabang ', '') || t.branchId;
-                          const trxHpp = getTransactionHPP(t);
-                          const trxLabaBersih = t.total - t.taxAmount - trxHpp;
-                          return (
-                            <tr key={t.id} className="hover:bg-stone-50">
-                              <td className="py-2.5 px-3">
-                                <p className="font-bold text-stone-800">{t.id}</p>
-                                <p className="text-[11px] text-stone-400">
-                                  {t.timestamp} • {t.paymentMethod}
-                                </p>
-                              </td>
-                              <td className="py-2.5 px-3 font-medium text-stone-700">{bName}</td>
-                              <td className="py-2.5 px-3 text-right">
-                                <p className="font-bold text-stone-900">{formatRp(t.total)}</p>
-                                <p className="text-[10px] text-stone-400">HPP: {formatRp(trxHpp)}</p>
-                              </td>
-                              <td className="py-2.5 px-3 text-right font-extrabold text-emerald-700">
-                                +{formatRp(trxLabaBersih)}
-                              </td>
-                              <td className="py-2.5 px-3 text-right">
-                                <button
-                                  onClick={() => setActiveReceipt(t)}
-                                  className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold text-[11px]"
-                                >
-                                  Lihat
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Stock Logs */}
-              <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
-                <div className="p-4 border-b border-stone-100 flex items-center justify-between gap-2">
-                  <div>
-                    <h3 className="font-bold text-sm text-stone-800">
-                      Log Mutasi Stok & Belanja Bahan
-                    </h3>
-                    <span className="text-[11px] text-stone-400">
-                      Riwayat belanja stok, transfer & opname cabang
-                    </span>
-                  </div>
-                  {role === 'owner' && filteredStockLogs.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setResetReportModal({
-                          scope: reportBranchFilter,
-                          target: 'logs'
-                        })
-                      }
-                      className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[11px] font-bold border border-red-200 flex items-center gap-1"
-                    >
-                      <Trash2 className="w-3 h-3" /> Reset Mutasi
-                    </button>
-                  )}
-                </div>
-                <div className="overflow-x-auto max-h-96">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-stone-50 text-stone-500 uppercase text-[11px] border-b border-stone-200">
-                        <th className="py-2.5 px-3">Waktu / Cabang</th>
-                        <th className="py-2.5 px-3">Bahan & Jenis</th>
-                        <th className="py-2.5 px-3 text-right">Perubahan</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-stone-100">
-                      {filteredStockLogs.length === 0 ? (
-                        <tr>
-                          <td colSpan={3} className="py-8 text-center text-stone-400 text-xs">
-                            Belum ada riwayat mutasi stok pada filter ini.
-                          </td>
-                        </tr>
-                      ) : (
-                        filteredStockLogs.map((log) => {
-                          const bName =
-                            branches
-                              .find((b) => b.id === log.branchId)
-                              ?.name.replace('Cabang ', '') || log.branchId;
-                          const isPositive = log.qtyChange > 0;
-                          return (
-                            <tr key={log.id} className="hover:bg-stone-50">
-                              <td className="py-2.5 px-3">
-                                <p className="font-semibold text-stone-700">{bName}</p>
-                                <p className="text-[11px] text-stone-400">{log.timestamp}</p>
-                              </td>
-                              <td className="py-2.5 px-3">
-                                <p className="font-bold text-stone-800">{log.ingredientName}</p>
-                                <p className="text-[11px] text-stone-500">
-                                  <span className="font-semibold">{log.type}</span> — {log.note}
-                                </p>
-                              </td>
-                              <td className="py-2.5 px-3 text-right">
-                                <span
-                                  className={`font-extrabold ${
-                                    isPositive ? 'text-emerald-600' : 'text-red-600'
-                                  }`}
-                                >
-                                  {isPositive ? `+${log.qtyChange}` : log.qtyChange} {log.unit}
-                                </span>
-                                {log.totalCost > 0 && (
-                                  <p className="text-[11px] text-stone-500">
-                                    Biaya: {formatRp(log.totalCost)}
-                                  </p>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ==================== TAB 5: KELOLA CABANG ==================== */}
-        {activeTab === 'branches' && role === 'owner' && (
-          <div className="space-y-5">
-            <div className="bg-white p-5 rounded-2xl border border-stone-200 shadow-sm flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="font-bold text-base text-stone-800">
-                  Daftar Cabang Kafe ({branches.length} Lokasi)
-                </h2>
-                <p className="text-xs text-stone-500">
-                  Setiap cabang memiliki inventori bahan baku independen, meja kasir, dan laporan masing-masing.
-                </p>
-              </div>
-              <button
-                onClick={() => setNewBranchModal(true)}
-                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm"
-              >
-                <Plus className="w-4 h-4" /> Buka / Tambah Cabang Baru
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-              {branches.map((b) => {
-                const bTrx = transactions.filter((t) => t.branchId === b.id);
-                const bOmzet = bTrx.reduce((acc, t) => acc + t.total, 0);
-                const stocks = branchStocks[b.id] || {};
-                const lowCount = ingredients.filter((i) => (stocks[i.id] || 0) <= i.minStock).length;
-
-                return (
-                  <div
-                    key={b.id}
-                    className={`bg-white rounded-2xl p-5 border transition flex flex-col justify-between ${
-                      selectedBranchId === b.id
-                        ? 'border-amber-600 ring-2 ring-amber-500/20'
-                        : 'border-stone-200'
-                    }`}
-                  >
-                    <div>
-                      <div className="flex items-start justify-between gap-2 mb-3">
-                        <div className="p-2.5 rounded-xl bg-stone-100 text-stone-800">
-                          <Store className="w-5 h-5" />
-                        </div>
-                        {selectedBranchId === b.id && (
-                          <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800">
-                            Sedang Aktif
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 block">
-                            {b.name}
-                          </span>
-                          <h3 className="font-extrabold text-base text-stone-900">
-                            {b.cafeName || b.name}
-                          </h3>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setEditBranchModal({ ...b })}
-                          className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-[11px] font-bold flex items-center gap-1 shrink-0 transition"
-                          title="Ganti Nama Cafe & Nama di Struk"
-                        >
-                          <Edit3 className="w-3 h-3" /> Edit Nama & Struk
-                        </button>
-                      </div>
-
-                      <div className="mt-2 px-2.5 py-1.5 rounded-lg bg-stone-100 border border-stone-200/80 text-[11px] flex items-center justify-between">
-                        <span className="text-stone-500">Judul di Struk:</span>
-                        <span className="font-mono font-bold text-stone-800">
-                          {b.receiptName || b.cafeName || b.name}
-                        </span>
-                      </div>
-
-                      <p className="text-xs text-stone-500 flex items-center gap-1 mt-2">
-                        <MapPin className="w-3.5 h-3.5 shrink-0" /> {b.address}
-                      </p>
-                      <p className="text-xs text-stone-500 flex items-center gap-1 mt-1">
-                        <Users className="w-3.5 h-3.5 shrink-0" /> Kepala Cabang:{' '}
-                        <strong className="text-stone-700">{b.manager}</strong> ({b.tables} Meja)
-                      </p>
-
-                      <div className="mt-4 pt-3 border-t border-stone-100 grid grid-cols-2 gap-2 text-xs">
-                        <div className="bg-stone-50 p-2.5 rounded-xl">
-                          <span className="text-[11px] text-stone-400 block">Omzet Hari Ini</span>
-                          <span className="font-extrabold text-stone-800">{formatRp(bOmzet)}</span>
-                        </div>
-                        <div className="bg-stone-50 p-2.5 rounded-xl">
-                          <span className="text-[11px] text-stone-400 block">Status Bahan</span>
-                          {lowCount > 0 ? (
-                            <span className="font-bold text-red-600">{lowCount} Perlu Restock</span>
-                          ) : (
-                            <span className="font-bold text-emerald-600">Semua Aman</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 pt-3 border-t border-stone-100 flex items-center gap-2">
-                      <button
-                        onClick={() => {
-                          setSelectedBranchId(b.id);
-                          setActiveTab('pos');
-                        }}
-                        className="flex-1 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold transition"
-                      >
-                        Buka Kasir Cabang
-                      </button>
-                      <button
-                        onClick={() => {
-                          setSelectedBranchId(b.id);
-                          setActiveTab('inventory');
-                        }}
-                        className="flex-1 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold transition"
-                      >
-                        Cek Stok
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDeleteBranchModal(b)}
-                        className="p-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition"
-                        title="Hapus / Tutup Cabang Ini"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Manajemen Akun Karyawan & Admin */}
-            <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden mt-6">
-              <div className="p-5 border-b border-stone-100 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 className="font-bold text-base text-stone-800">
-                    Manajemen Akun Login Karyawan & Admin
-                  </h3>
-                  <p className="text-xs text-stone-500">
-                    Akun berstatus <strong>Karyawan Kasir</strong> otomatis dibatasi hanya untuk melakukan transaksi penjualan (POS) di cabang penugasannya.
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    setNewUserForm({
-                      name: '',
-                      username: '',
-                      pin: '',
-                      role: 'cashier',
-                      branchId: selectedBranchId
-                    });
-                    setNewUserModal(true);
-                  }}
-                  className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 text-xs font-bold flex items-center gap-1.5 shadow-sm"
-                >
-                  <UserPlus className="w-4 h-4" /> + Tambah Akun Karyawan / Admin
-                </button>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-stone-100/80 text-stone-600 uppercase text-[11px] font-bold border-b border-stone-200">
-                      <th className="py-3 px-4">Nama Lengkap</th>
-                      <th className="py-3 px-4">Username</th>
-                      <th className="py-3 px-4">PIN Login</th>
-                      <th className="py-3 px-4">Peran & Hak Akses</th>
-                      <th className="py-3 px-4">Cabang Penugasan</th>
-                      <th className="py-3 px-4 text-right">Aksi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-100">
-                    {users.map((u) => {
-                      const isOwner = u.role === 'owner';
-                      const bName =
-                        u.branchId === 'ALL'
-                          ? 'Semua Cabang (Pusat)'
-                          : branches.find((b) => b.id === u.branchId)?.name || u.branchId;
-                      return (
-                        <tr key={u.id} className="hover:bg-stone-50">
-                          <td className="py-3 px-4 font-bold text-stone-800">{u.name}</td>
-                          <td className="py-3 px-4 font-mono text-stone-700">{u.username}</td>
-                          <td className="py-3 px-4 font-mono text-stone-600">
-                            <div className="flex items-center gap-1.5">
-                              <span>{showPinMap[u.id] ? u.pin : '••••'}</span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setShowPinMap({ ...showPinMap, [u.id]: !showPinMap[u.id] })
-                                }
-                                className="text-stone-400 hover:text-stone-700"
-                                title={showPinMap[u.id] ? 'Sembunyikan PIN' : 'Lihat PIN'}
-                              >
-                                {showPinMap[u.id] ? (
-                                  <EyeOff className="w-3.5 h-3.5" />
-                                ) : (
-                                  <Eye className="w-3.5 h-3.5" />
-                                )}
-                              </button>
-                            </div>
-                          </td>
-                          <td className="py-3 px-4">
-                            {isOwner ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                <ShieldCheck className="w-3 h-3" /> Admin / Owner (Akses Penuh)
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
-                                <UserCheck className="w-3 h-3" /> Karyawan (Hanya Transaksi POS)
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4 font-medium text-stone-700">{bName}</td>
-                          <td className="py-3 px-4 text-right">
-                            {u.id !== currentUser?.id ? (
-                              <button
-                                onClick={() => handleDeleteUser(u.id)}
-                                className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 font-semibold text-[11px]"
-                              >
-                                Hapus
-                              </button>
-                            ) : (
-                              <span className="text-[11px] text-stone-400 italic">Sedang Login</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
           </div>
         )}
           </main>
@@ -5995,140 +4945,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ==================== MODAL 13: BUAT KODE LISENSI BARU ==================== */}
-      {newLicenseModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <form
-            onSubmit={handleCreateLicense}
-            className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-stone-200 space-y-4"
-          >
-            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
-              <div className="flex items-center gap-2">
-                <div className="p-2 rounded-xl bg-amber-50 text-amber-600">
-                  <KeyRound className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-base text-stone-900">
-                    Buat Kode Lisensi Pengguna Baru
-                  </h3>
-                  <p className="text-xs text-stone-500">
-                    Berikan kode ini kepada pengguna aplikasi Android / Desktop
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setNewLicenseModal(false)}
-                className="text-stone-400 hover:text-stone-600"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="block font-bold text-stone-700 mb-1">
-                  Kode Lisensi (Otomatis atau Ketik Sendiri)
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    required
-                    value={newLicenseForm.code}
-                    onChange={(e) =>
-                      setNewLicenseForm({
-                        ...newLicenseForm,
-                        code: e.target.value.toUpperCase()
-                      })
-                    }
-                    className="flex-1 px-3 py-2 bg-amber-50/70 border border-amber-300 rounded-xl font-mono font-extrabold text-amber-900 uppercase"
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setNewLicenseForm({
-                        ...newLicenseForm,
-                        code: generateRandomLicenseCode()
-                      })
-                    }
-                    className="px-3 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold flex items-center gap-1"
-                    title="Acak Kode Baru"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" /> Acak
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-stone-700 mb-1">
-                  Nama Pemegang / Perangkat Pengguna
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={newLicenseForm.holderName}
-                  onChange={(e) =>
-                    setNewLicenseForm({ ...newLicenseForm, holderName: e.target.value })
-                  }
-                  placeholder="Contoh: Tablet Kasir Cabang Probolinggo / Mitra A"
-                  className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">Cakupan Cabang</label>
-                  <select
-                    value={newLicenseForm.branchId}
-                    onChange={(e) =>
-                      setNewLicenseForm({ ...newLicenseForm, branchId: e.target.value })
-                    }
-                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-semibold"
-                  >
-                    <option value="ALL">Semua Cabang</option>
-                    {branches.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">
-                    Masa Berlaku (YYYY-MM-DD)
-                  </label>
-                  <input
-                    type="text"
-                    value={newLicenseForm.expiryDate}
-                    onChange={(e) =>
-                      setNewLicenseForm({ ...newLicenseForm, expiryDate: e.target.value })
-                    }
-                    placeholder="2027-12-31 atau SEUMUR HIDUP"
-                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-stone-100">
-              <button
-                type="button"
-                onClick={() => setNewLicenseModal(false)}
-                className="px-4 py-2 rounded-xl bg-stone-100 text-stone-700 text-xs font-bold"
-              >
-                Batal
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold"
-              >
-                Simpan Kode Lisensi
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
         {/* ==================== MODAL SINKRON MUDAH 1 KODE TOKO ==================== */}
         {cloudModal && (
           <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 text-stone-800">
@@ -6140,10 +4956,10 @@ export default function App() {
                   </div>
                   <div>
                     <h3 className="font-bold text-base text-stone-900">
-                      Sinkron Antar-HP Super Mudah (1 Kode)
+                      Hubungkan HP Admin & HP Kasir
                     </h3>
                     <p className="text-xs text-stone-500">
-                      Tanpa daftar akun rumit — cukup samakan Kode Toko!
+                      Sinkronisasi otomatis antar perangkat & pemisah kafe
                     </p>
                   </div>
                 </div>
@@ -6157,34 +4973,38 @@ export default function App() {
               </div>
 
               <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
-                {/* LANGKAH TUNGGAL: KODE TOKO */}
-                <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <label className="font-extrabold text-amber-950 text-sm">
-                      Ketik Kode Unik Kafe Anda:
-                    </label>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
-                      Otomatis Sinkron
+                {/* STEP 1: BUAT ATAU MASUKKAN KODE CLOUD TOKO */}
+                <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-extrabold text-amber-950 text-xs">
+                      1. Di HP Admin (Pertama Kali):
                     </span>
+                    <button
+                      type="button"
+                      onClick={handleCreateAutoCloudCode}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shadow-sm transition flex items-center gap-1"
+                    >
+                      <Cloud className="w-3.5 h-3.5" /> Buat Kode Cloud Baru
+                    </button>
                   </div>
 
-                  <input
-                    type="text"
-                    required
-                    value={workspaceId}
-                    onChange={(e) => setWorkspaceId(e.target.value.toUpperCase())}
-                    placeholder="Contoh: RAMUJAYA-01"
-                    className="w-full px-3.5 py-3 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-base text-stone-900 uppercase tracking-wider text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  />
+                  <div className="border-t border-amber-200/80 pt-2.5 space-y-1.5">
+                    <label className="block font-extrabold text-amber-950 text-xs">
+                      2. Kode Toko Cloud Aktif (Ketik Kode Ini di HP Kasir):
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={workspaceId}
+                      onChange={(e) => setWorkspaceId(e.target.value)}
+                      placeholder="Klik Buat Kode Cloud Baru di atas..."
+                      className="w-full px-3 py-2.5 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-sm text-stone-900 text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                  </div>
 
                   <div className="bg-white/90 p-2.5 rounded-xl border border-amber-200 text-[11px] text-stone-700 space-y-1 leading-relaxed">
                     <p>
-                      ✅ <strong>Cara Pakai untuk HP Admin & HP Kasir Anda:</strong><br />
-                      Cukup ketik Kode yang <strong>SAMA</strong> (misal: <code>RAMUJAYA-01</code>) di HP Admin dan di HP Kasir, lalu klik <strong>Hubungkan Sekarang</strong>.
-                    </p>
-                    <p>
-                      ✅ <strong>Cara Pakai Jika Ada Kafe / Orang Lain Mau Pakai:</strong><br />
-                      Suruh mereka mengetik Kode nama kafe mereka sendiri (misal: <code>KOPI-BINTANG</code>). Otomatis seluruh menu, stok, dan laporan mereka terpisah sendiri!
+                      💡 <strong>Kenapa sebelumnya belum nyambung?</strong> Karena nama teks biasa hanya tersimpan di HP masing-masing. Klik tombol hijau <strong>"Buat Kode Cloud Baru"</strong> di atas agar sistem membuatkan <strong>Kode Server Cloud (<code>RJ-...</code>)</strong>, lalu klik <strong>Kirim Link WA</strong> ke HP Kasir!
                     </p>
                   </div>
 
@@ -6206,21 +5026,21 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* ALTERNATIF: SALIN & TEMPEL KODE DATA VIA WHATSAPP (100% PASTI BISA TANPA SERVER) */}
+                {/* CARA PALING PASTI (TANPA SERVER): SALIN & TEMPEL VIA WHATSAPP */}
                 <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-2.5">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <div>
                       <p className="font-bold text-stone-800">
-                        Sinkron Instan via Chat WhatsApp (Salin & Tempel)
+                        Cara Alternatif: Kirim Data via Chat WhatsApp
                       </p>
                       <p className="text-[11px] text-stone-500">
-                        Kirim seluruh data menu, stok & transaksi ke HP lain lewat pesan WA:
+                        100% berhasil di semua jaringan HP tanpa perlu server:
                       </p>
                     </div>
                     <button
                       type="button"
                       onClick={handleCopyWhatsAppSyncCode}
-                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 shrink-0"
+                      className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-[11px] flex items-center gap-1 shrink-0"
                     >
                       <Copy className="w-3.5 h-3.5" /> 1. Salin Data HP Ini
                     </button>
@@ -6237,14 +5057,14 @@ export default function App() {
                     <button
                       type="button"
                       onClick={handleApplyWhatsAppSyncCode}
-                      className="px-3 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-[11px] shrink-0"
+                      className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shrink-0"
                     >
                       Terapkan
                     </button>
                   </div>
                 </div>
 
-                {/* OPSI LANJUTAN (DISEMBUNYIKAN AGAR TIDAK MEMBINGUNGKAN) */}
+                {/* OPSI LANJUTAN */}
                 <div className="pt-1 border-t border-stone-100">
                   <button
                     type="button"
@@ -6253,21 +5073,21 @@ export default function App() {
                   >
                     <Settings className="w-3 h-3" />
                     {showAdvancedCloud
-                      ? 'Sembunyikan Pengaturan Server Pribadi'
-                      : 'Pengaturan Lanjutan (Opsional: Server Firebase / Backup File)'}
+                      ? 'Sembunyikan Pengaturan Lanjutan'
+                      : 'Pengaturan Lanjutan (Backup File JSON / Firebase)'}
                   </button>
 
                   {showAdvancedCloud && (
                     <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
                       <div>
                         <label className="block font-bold text-stone-700 mb-1">
-                          URL Server Firebase Pribadi (Kosongkan jika pakai Server Otomatis)
+                          URL Database Cloud / Firebase (Terisi Otomatis Saat Buat Kode Cloud)
                         </label>
                         <input
                           type="url"
                           value={cloudEndpoint}
                           onChange={(e) => setCloudEndpoint(e.target.value)}
-                          placeholder="Opsional: https://...firebasedatabase.app"
+                          placeholder="https://..."
                           className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-[11px]"
                         />
                       </div>
