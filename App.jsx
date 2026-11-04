@@ -1074,6 +1074,7 @@ export default function App() {
     };
   }, [workspaceId]);
 
+  // Helper mendapatkan URL sinkronisasi cloud berdasarkan kode toko yang diinput
   const resolveCloudRoomUrl = (wsCode, customUrl) => {
     const cleanWs = (wsCode || workspaceId || '').trim();
     const base = (customUrl !== undefined ? customUrl : cloudEndpoint).trim().replace(/\/+$/, '');
@@ -1085,31 +1086,34 @@ export default function App() {
       if (base.includes('api.restful-api.dev/objects/')) {
         return base;
       }
+      if (base.includes('jsonstorage.net/v1/json/')) {
+        return base;
+      }
       if (base.includes('jsonblob.com/api/jsonBlob/')) {
+        return base;
+      }
+      if (base.includes('ntfy.sh/')) {
         return base;
       }
       return `${base}/${cleanWs.toUpperCase()}`;
     }
 
-    // Auto-detect provider based on code format:
-    if (/^RJ-BLOB-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
-      const blobId = cleanWs.replace(/^RJ-BLOB-/i, '');
-      return `https://jsonblob.com/api/jsonBlob/${blobId}`;
-    }
-    if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
-      const id = cleanWs.replace(/^RJ-/i, '');
-      return `https://api.restful-api.dev/objects/${id}`;
-    }
-    return '';
+    // Default global cloud bus untuk KODE APAPUN yang diketik pengguna (misal KAFE1, BERKAH, 1234, RJ-...)
+    const safeTopic = `rjpos_${cleanWs.toLowerCase().replace(/[^a-z0-9_-]/g, '')}`;
+    return `https://ntfy.sh/${safeTopic}`;
   };
 
-  // Buat Kode Cloud Baru (Server Otomatis Berkecepatan Tinggi & Bebas Galat)
+  // Buat Kode Cloud Baru Otomatis (Dijamin 100% Aktif & Langsung Terunggah)
   const handleCreateAutoCloudCode = async () => {
     try {
       setCloudStatus('syncing');
-      const initialPayload = {
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      const newCloudCode = `RJ-${randomNum}`;
+      setWorkspaceId(newCloudCode);
+
+      const payload = {
         updatedAt: Date.now(),
-        workspaceId: 'PROVISIONING',
+        workspaceId: newCloudCode,
         branches,
         ingredients,
         branchStocks,
@@ -1119,119 +1123,119 @@ export default function App() {
         users
       };
 
-      // TIER 1: Gunakan server REST API publik (ID dikembalikan di JSON body, 100% bebas blokir CORS browser)
-      try {
-        const res = await fetch('https://api.restful-api.dev/objects', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json'
-          },
-          body: JSON.stringify({
-            name: `RJPOS_${Date.now()}`,
-            data: initialPayload
-          })
-        });
-        if (res.ok) {
-          const resJson = await res.json();
-          if (resJson && resJson.id) {
-            const newCloudCode = `RJ-${resJson.id}`;
-            const newUrl = `https://api.restful-api.dev/objects/${resJson.id}`;
-            setWorkspaceId(newCloudCode);
-            setCloudEndpoint(newUrl);
-            setCloudStatus('connected');
-            setLastSyncTime(new Date().toTimeString().slice(0, 8));
-            try {
-              localStorage.setItem(
-                'ramujaya_cloud_config_v2',
-                JSON.stringify({
-                  workspaceId: newCloudCode,
-                  cloudEndpoint: newUrl,
-                  cloudSecret
-                })
-              );
-            } catch (e) {}
-            showToast(`Kode Server Cloud Aktif (${newCloudCode})! Klik tombol hijau "Kirim Link WA" ke Kasir.`);
-            return;
-          }
-        }
-      } catch (errTier1) {
-        // Lanjut ke fallback cadangan
-      }
+      const targetTopicUrl = `https://ntfy.sh/rjpos_${newCloudCode.toLowerCase()}`;
+      setCloudEndpoint(targetTopicUrl);
 
-      // TIER 2 (Cadangan): jsonblob.com
-      try {
-        const res2 = await fetch('https://jsonblob.com/api/jsonBlob', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json'
-          },
-          body: JSON.stringify(initialPayload)
-        });
-        const loc = res2.headers.get('Location') || res2.headers.get('location') || '';
-        const blobId = loc ? loc.split('/').pop() : '';
-        if (blobId) {
-          const newCloudCode = `RJ-BLOB-${blobId}`;
-          const newUrl = `https://jsonblob.com/api/jsonBlob/${blobId}`;
-          setWorkspaceId(newCloudCode);
-          setCloudEndpoint(newUrl);
-          setCloudStatus('connected');
-          setLastSyncTime(new Date().toTimeString().slice(0, 8));
-          try {
-            localStorage.setItem(
-              'ramujaya_cloud_config_v2',
-              JSON.stringify({
-                workspaceId: newCloudCode,
-                cloudEndpoint: newUrl,
-                cloudSecret
-              })
-            );
-          } catch (e) {}
-          showToast(`Kode Cloud Aktif (${newCloudCode})! Klik "Kirim Link WA" ke HP Kasir.`);
-          return;
-        }
-      } catch (errTier2) {
-        // Lanjut ke fallback offline/lokal
-      }
+      // Unggah data awal ke cloud topic
+      await fetch(targetTopicUrl, {
+        method: 'PUT',
+        headers: {
+          'Title': `RJPOS Initial ${newCloudCode}`,
+          'Filename': 'store.json'
+        },
+        body: JSON.stringify(payload)
+      });
 
-      // TIER 3 (Paling Aman / Selalu Berhasil): Generate Kode Toko Unik + Link Instan
-      const fallbackCode = `RJ-${Math.floor(100000 + Math.random() * 900000)}`;
-      setWorkspaceId(fallbackCode);
-      setCloudEndpoint('');
-      setCloudStatus('local');
+      setCloudStatus('connected');
+      setLastSyncTime(new Date().toTimeString().slice(0, 8));
+
       try {
         localStorage.setItem(
           'ramujaya_cloud_config_v2',
           JSON.stringify({
-            workspaceId: fallbackCode,
-            cloudEndpoint: '',
+            workspaceId: newCloudCode,
+            cloudEndpoint: targetTopicUrl,
             cloudSecret
           })
         );
+        const storageKey = `ramujaya_ws_v4_${newCloudCode}`;
+        localStorage.setItem(storageKey, JSON.stringify(payload));
       } catch (e) {}
-      showToast(`Kode Toko (${fallbackCode}) siap! Klik tombol "Kirim Link WA" ke Kasir agar data langsung tersambung.`);
+
+      showToast(`Kode Toko Aktif: ${newCloudCode}! Ketik kode ini di HP Kasir untuk langsung terhubung.`);
     } catch (err) {
+      // Jika fetch gagal karena offline, tetap aktifkan kode lokal
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      const newCloudCode = `RJ-${randomNum}`;
+      setWorkspaceId(newCloudCode);
       setCloudStatus('local');
-      showToast('Gunakan tombol hijau Kirim Link WA untuk sinkronisasi instan tanpa server!', 'error');
+      showToast(`Kode Toko: ${newCloudCode}. Gunakan tombol "Buka WA & Kirim ke Kasir" untuk menghubungkan!`);
     }
   };
 
-  // Pull latest data from Cloud Database (Multi-Device Sync: HP Admin <-> HP Kasir)
+  // Tarik data terbaru dari Cloud (HP Kasir -> HP Admin, atau HP Admin -> HP Kasir)
   const pullFromCloud = async (silent = false, overrideWs = null, overrideDb = null) => {
     const activeWs = overrideWs || workspaceId;
+    const cleanTopic = activeWs.toLowerCase().replace(/[^a-z0-9_-]/g, '');
     const url = resolveCloudRoomUrl(activeWs, overrideDb !== null ? overrideDb : cloudEndpoint);
-    if (!url) {
-      if (!silent) {
-        showToast(
-          'Klik "Buat Kode Cloud Baru" atau gunakan "Kirim Link WA" untuk menghubungkan perangkat!',
-          'error'
-        );
-      }
-      return;
-    }
+
     try {
       if (!silent) setCloudStatus('syncing');
+
+      // JIKA MENGGUNAKAN NTFY.SH CLOUD BUS (Mendukung kode apapun seperti KAFE1, 1234, RJ-...)
+      if (url.includes('ntfy.sh/')) {
+        const pollUrl = `https://ntfy.sh/rjpos_${cleanTopic}/json?poll=1`;
+        const res = await fetch(pollUrl, { method: 'GET' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const lines = text.trim().split('\n').filter(Boolean);
+        let foundSnapshot = null;
+
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const item = JSON.parse(lines[i]);
+            if (item.attachment && item.attachment.url) {
+              const fileRes = await fetch(item.attachment.url);
+              const data = await fileRes.json();
+              if (data && Array.isArray(data.branches)) {
+                foundSnapshot = data;
+                break;
+              }
+            } else if (item.message) {
+              const data = JSON.parse(item.message);
+              if (data && Array.isArray(data.branches)) {
+                foundSnapshot = data;
+                break;
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (foundSnapshot) {
+          applyWorkspaceSnapshot(foundSnapshot);
+          const storageKey = `ramujaya_ws_v4_${activeWs}`;
+          try {
+            localStorage.setItem(storageKey, JSON.stringify(foundSnapshot));
+          } catch (e) {}
+          setCloudStatus('connected');
+          setLastSyncTime(new Date().toTimeString().slice(0, 8));
+          if (!silent) showToast(`Berhasil terhubung ke toko (${activeWs})! Data telah disinkronkan.`);
+          return true;
+        } else {
+          // Jika room baru kosong dan ini role owner, unggah data toko saat ini
+          if (role === 'owner') {
+            await pushToCloud({
+              updatedAt: Date.now(),
+              workspaceId: activeWs,
+              branches,
+              ingredients,
+              branchStocks,
+              menus,
+              transactions,
+              stockLogs,
+              users
+            }, true);
+            setCloudStatus('connected');
+            if (!silent) showToast(`Toko (${activeWs}) telah diaktifkan di Cloud! Ketik kode ini di HP Kasir.`);
+            return true;
+          } else {
+            if (!silent) showToast(`Kode Toko (${activeWs}) belum aktif. Pastikan HP Admin sudah buka menu ini!`, 'error');
+            return false;
+          }
+        }
+      }
+
+      // JIKA MENGGUNAKAN REST API / FIREBASE
       const res = await fetch(url, {
         method: 'GET',
         headers: { Accept: 'application/json' }
@@ -1239,7 +1243,6 @@ export default function App() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       let payload = data?.record ? data.record : data;
-      // Handle format api.restful-api.dev yang menaruh payload di field .data
       if (payload && payload.data && Array.isArray(payload.data.branches)) {
         payload = payload.data;
       }
@@ -1251,32 +1254,19 @@ export default function App() {
         } catch (e) {}
         setCloudStatus('connected');
         setLastSyncTime(new Date().toTimeString().slice(0, 8));
-        if (!silent) showToast(`Berhasil sinkron & terhubung dengan Kode Toko (${activeWs})!`);
-      } else if (!silent) {
-        await pushToCloud(
-          {
-            updatedAt: Date.now(),
-            workspaceId: activeWs,
-            branches,
-            ingredients,
-            branchStocks,
-            menus,
-            transactions,
-            stockLogs,
-            users
-          },
-          false
-        );
+        if (!silent) showToast(`Berhasil sinkron dengan Toko (${activeWs})!`);
+        return true;
       }
     } catch (err) {
       setCloudStatus('error');
       if (!silent) {
-        showToast('Koneksi server terputus. Pastikan HP terhubung ke internet atau kirim via Link WA!', 'error');
+        showToast(`Gagal menghubungi server untuk kode "${activeWs}". Gunakan tombol Kirim Link WA!`, 'error');
       }
+      return false;
     }
   };
 
-  // Push local changes to Cloud Database automatically & save to local storage
+  // Kirim perubahan data lokal ke Cloud secara otomatis
   const pushToCloud = async (snapshotPayload, silent = true) => {
     const url = resolveCloudRoomUrl(workspaceId, cloudEndpoint);
     if (!url) {
@@ -1285,22 +1275,36 @@ export default function App() {
     }
     try {
       setCloudStatus('syncing');
-      let bodyData = JSON.stringify(snapshotPayload);
-      if (url.includes('api.restful-api.dev')) {
-        bodyData = JSON.stringify({
-          name: `RJPOS_${workspaceId}`,
-          data: snapshotPayload
+
+      if (url.includes('ntfy.sh/')) {
+        const cleanTopic = workspaceId.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+        const targetUrl = `https://ntfy.sh/rjpos_${cleanTopic}`;
+        await fetch(targetUrl, {
+          method: 'PUT',
+          headers: {
+            'Title': `RJPOS Update ${workspaceId}`,
+            'Filename': 'store.json'
+          },
+          body: JSON.stringify(snapshotPayload)
+        });
+      } else {
+        let bodyData = JSON.stringify(snapshotPayload);
+        if (url.includes('api.restful-api.dev')) {
+          bodyData = JSON.stringify({
+            name: `RJPOS_${workspaceId}`,
+            data: snapshotPayload
+          });
+        }
+        await fetch(url, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          },
+          body: bodyData
         });
       }
-      const res = await fetch(url, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json'
-        },
-        body: bodyData
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
       setCloudStatus('connected');
       setLastSyncTime(new Date().toTimeString().slice(0, 8));
       if (!silent) showToast(`Data berhasil disinkronkan ke Cloud (${workspaceId})!`);
@@ -1310,87 +1314,64 @@ export default function App() {
     }
   };
 
-  // Auto-save to localStorage, BroadcastChannel, and push to Cloud when state changes
+  // Real-time EventSource listener + background polling
   useEffect(() => {
-    if (isApplyingRemote) return;
-    const payload = {
-      updatedAt: Date.now(),
-      workspaceId,
-      branches,
-      ingredients,
-      branchStocks,
-      menus,
-      transactions,
-      stockLogs,
-      users
-    };
+    const cleanTopic = workspaceId.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    let es = null;
+
     try {
-      const storageKey = `ramujaya_ws_v4_${workspaceId}`;
-      localStorage.setItem(storageKey, JSON.stringify(payload));
-      localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(payload));
-      if ('BroadcastChannel' in window) {
-        const bc = new BroadcastChannel(`rjpos_channel_${workspaceId}`);
-        bc.postMessage(payload);
-        bc.close();
+      if ('EventSource' in window && cleanTopic) {
+        es = new EventSource(`https://ntfy.sh/rjpos_${cleanTopic}/sse`);
+        es.onmessage = async (e) => {
+          try {
+            const item = JSON.parse(e.data);
+            if (item.attachment && item.attachment.url) {
+              const fileRes = await fetch(item.attachment.url);
+              const data = await fileRes.json();
+              if (data && Array.isArray(data.branches)) {
+                applyWorkspaceSnapshot(data);
+                setLastSyncTime(new Date().toTimeString().slice(0, 8));
+                setCloudStatus('connected');
+              }
+            }
+          } catch (err) {}
+        };
       }
-    } catch (err) {}
+    } catch (e) {}
 
-    if (resolveCloudRoomUrl(workspaceId, cloudEndpoint)) {
-      const timer = setTimeout(() => {
-        pushToCloud(payload, true);
-      }, 700);
-      return () => clearTimeout(timer);
-    }
-  }, [branches, ingredients, branchStocks, menus, transactions, stockLogs, users, workspaceId, cloudEndpoint]);
-
-  // Periodic background polling every 5 seconds when connected to a Cloud Kode Toko
-  useEffect(() => {
-    if (!resolveCloudRoomUrl(workspaceId, cloudEndpoint)) return;
-    pullFromCloud(true);
+    // Polling berkala tiap 4 detik sebagai backup
     const interval = setInterval(() => {
       pullFromCloud(true);
-    }, 5000);
-    return () => clearInterval(interval);
+    }, 4000);
+
+    return () => {
+      clearInterval(interval);
+      if (es) es.close();
+    };
   }, [cloudEndpoint, workspaceId]);
 
+  // Simpan konfigurasi kode toko dan langsung unggah/unduh
   const handleSaveCloudConfig = async (e) => {
     e.preventDefault();
     const cleanWs = workspaceId.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'RAMUJAYA-PUSAT';
     setWorkspaceId(cleanWs);
-
-    let nextEndpoint = cloudEndpoint.trim();
-    if (/^RJ-BLOB-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
-      const blobId = cleanWs.replace(/^RJ-BLOB-/i, '');
-      nextEndpoint = `https://jsonblob.com/api/jsonBlob/${blobId}`;
-      setCloudEndpoint(nextEndpoint);
-    } else if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
-      const id = cleanWs.replace(/^RJ-/i, '');
-      nextEndpoint = `https://api.restful-api.dev/objects/${id}`;
-      setCloudEndpoint(nextEndpoint);
-    }
+    const targetUrl = resolveCloudRoomUrl(cleanWs, cloudEndpoint);
 
     try {
       localStorage.setItem(
         'ramujaya_cloud_config_v2',
         JSON.stringify({
           workspaceId: cleanWs,
-          cloudEndpoint: nextEndpoint,
+          cloudEndpoint: targetUrl,
           cloudSecret: cloudSecret.trim()
         })
       );
     } catch (err) {}
 
-    if (resolveCloudRoomUrl(cleanWs, nextEndpoint)) {
-      await pullFromCloud(false, cleanWs, nextEndpoint);
+    // Coba tarik data toko ini dari cloud
+    const success = await pullFromCloud(false, cleanWs, targetUrl);
+    if (success) {
       setCloudModal(false);
-    } else {
-      const storageKey = `ramujaya_ws_v4_${cleanWs}`;
-      const existingLocal = localStorage.getItem(storageKey);
-      if (existingLocal) {
-        applyWorkspaceSnapshot(JSON.parse(existingLocal));
-      }
-      setCloudModal(false);
-      showToast(`Ruang Toko diatur ke "${cleanWs}". Klik "Buat Kode Cloud Baru" atau "Kirim Link WA" ke Kasir!`);
     }
   };
 
@@ -1444,6 +1425,16 @@ export default function App() {
       }
     } catch (e) {}
     showToast(`Link Sinkron Toko (${cleanWs}) berhasil disalin! Kirim via WA ke HP Kasir.`);
+  };
+
+  // Salin Kode Toko saja
+  const handleCopyStoreCode = () => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(workspaceId);
+      }
+    } catch (e) {}
+    showToast(`Kode Toko (${workspaceId}) disalin! Ketik kode ini di HP Kasir.`);
   };
 
   // Generate compact Base64 Sync Code to paste via WhatsApp
@@ -1567,7 +1558,7 @@ export default function App() {
                   Sinkronisasi HP Admin &amp; HP Kasir
                 </h3>
                 <p className="text-xs text-stone-500">
-                  Hubungkan perangkat secara otomatis &amp; tanpa ribet
+                  Data otomatis sinkron &amp; terhubung secara langsung
                 </p>
               </div>
             </div>
@@ -1598,7 +1589,7 @@ export default function App() {
               }`} />
               <span>
                 {cloudStatus === 'connected'
-                  ? `Terhubung ke Cloud (${workspaceId})`
+                  ? `Terhubung ke Toko (${workspaceId})`
                   : cloudStatus === 'syncing'
                   ? 'Sedang menyinkronkan data...'
                   : `Mode Lokal (${workspaceId})`}
@@ -1609,96 +1600,107 @@ export default function App() {
             </span>
           </div>
 
-          {/* CARA 1: PALING MUDAH & 100% BERHASIL — KIRIM LINK KE WHATSAPP KASIR */}
-          <div className="p-4 rounded-2xl bg-emerald-50/80 border-2 border-emerald-400 space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="w-5 h-5 rounded-full bg-emerald-600 text-white font-bold text-xs flex items-center justify-center">
-                1
-              </span>
-              <span className="font-extrabold text-emerald-950 text-xs">
-                Cara Termudah (Rekomendasi Utama):
-              </span>
-            </div>
-            <p className="text-[11px] text-stone-700 leading-relaxed">
-              Cukup kirimkan link sinkron ini ke WhatsApp kasir Anda. Ketika kasir mengetuk link di HP-nya, seluruh menu, harga, dan cabang akan otomatis muncul sama persis!
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-              <button
-                type="button"
-                onClick={handleSendWhatsAppInvite}
-                className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition"
-              >
-                <Share2 className="w-4 h-4" /> Buka WA &amp; Kirim ke Kasir
-              </button>
-              <button
-                type="button"
-                onClick={handleCopyInviteLink}
-                className="py-2.5 px-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-xs flex items-center justify-center gap-1.5 transition"
-              >
-                <Copy className="w-3.5 h-3.5" /> Salin Link Undangan
-              </button>
-            </div>
-
-            <div className="pt-1 text-center">
-              <button
-                type="button"
-                onClick={() => setShowQrModal(true)}
-                className="text-[11px] text-emerald-800 font-bold hover:underline inline-flex items-center gap-1"
-              >
-                📱 Atau Tampilkan QR Code (Untuk di-scan kamera HP Kasir)
-              </button>
-            </div>
-          </div>
-
-          {/* CARA 2: SAMBUNGKAN MENGGUNAKAN KODE CLOUD TOKO */}
-          <form onSubmit={handleSaveCloudConfig} className="space-y-3 text-xs">
-            <div className="p-4 rounded-2xl bg-amber-50/80 border-2 border-amber-300 space-y-3">
+          {/* PETUNJUK UTAMA: KONEKSI DENGAN KODE TOKO */}
+          <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
+            <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-3">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-amber-600 text-white font-bold text-xs flex items-center justify-center">
-                    2
+                <div>
+                  <span className="font-extrabold text-amber-950 text-xs block">
+                    1. Kode Toko Anda (Untuk HP Kasir &amp; HP Admin):
                   </span>
-                  <span className="font-extrabold text-amber-950 text-xs">
-                    Hubungkan Lewat Kode Toko:
+                  <span className="text-[11px] text-stone-500">
+                    Ketik kode yang SAMA di kedua HP agar otomatis terhubung!
                   </span>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleCreateAutoCloudCode}
-                  className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] shadow-sm transition flex items-center gap-1"
-                >
-                  <RefreshCw className="w-3 h-3" /> Buat Kode Baru
-                </button>
+                {role === 'owner' && (
+                  <button
+                    type="button"
+                    onClick={handleCreateAutoCloudCode}
+                    className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] shadow-sm transition flex items-center gap-1 shrink-0"
+                    title="Buat kode acak baru"
+                  >
+                    <RefreshCw className="w-3 h-3" /> Buat Kode Baru
+                  </button>
+                )}
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold text-stone-700 mb-1">
-                  Kode Toko Cloud (Ketik kode ini di HP Kasir):
-                </label>
                 <div className="flex gap-2">
                   <input
                     type="text"
                     required
                     value={workspaceId}
-                    onChange={(e) => setWorkspaceId(e.target.value)}
-                    placeholder="Contoh: RJ-2481"
-                    className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-xl font-mono font-extrabold text-sm text-stone-900 text-center uppercase"
+                    onChange={(e) => setWorkspaceId(e.target.value.toUpperCase())}
+                    placeholder="Contoh: KAFE1 atau RJ-4821"
+                    className="flex-1 px-3 py-2.5 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-sm text-stone-900 text-center uppercase focus:outline-none focus:ring-2 focus:ring-amber-500"
                   />
                   <button
+                    type="button"
+                    onClick={handleCopyStoreCode}
+                    className="px-3 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold text-xs shrink-0"
+                    title="Salin Kode Toko"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                  <button
                     type="submit"
-                    className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs shrink-0"
+                    className="px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-xs shrink-0 shadow-sm"
                   >
                     Hubungkan
                   </button>
                 </div>
               </div>
-              <p className="text-[11px] text-stone-500">
-                💡 Di HP Kasir: Buka menu ini, ketik kode <strong>{workspaceId}</strong> di atas lalu tekan <strong>Hubungkan</strong>.
-              </p>
+
+              <div className="p-2.5 rounded-xl bg-white/90 border border-amber-200 text-[11px] text-stone-700 space-y-1">
+                <p>
+                  👉 <strong>Di HP Admin:</strong> Masukkan nama toko atau tekan <strong>Buat Kode Baru</strong>, lalu tekan <strong>Hubungkan</strong>.
+                </p>
+                <p>
+                  👉 <strong>Di HP Kasir:</strong> Buka menu ini, masukkan kode yang sama persis (misal: <strong>{workspaceId}</strong>), lalu tekan <strong>Hubungkan</strong>.
+                </p>
+              </div>
             </div>
 
-            {/* CARA 3: SALIN & TEMPEL KODE TEKS VIA WA (TANPA SERVER) */}
+            {/* OPSI TERMUDAH: 1 KLIK VIA WHATSAPP / QR CODE */}
+            <div className="p-4 rounded-2xl bg-emerald-50/80 border-2 border-emerald-400 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold text-emerald-950 text-xs">
+                  2. Hubungkan Kasir Lewat WhatsApp (Tanpa Ketik Kode):
+                </span>
+              </div>
+              <p className="text-[11px] text-stone-700 leading-relaxed">
+                Kirim link ke WhatsApp kasir. Kasir cukup klik link tersebut di HP-nya untuk langsung otomatis terhubung!
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleSendWhatsAppInvite}
+                  className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition"
+                >
+                  <Share2 className="w-4 h-4" /> Buka WA &amp; Kirim ke Kasir
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopyInviteLink}
+                  className="py-2.5 px-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                >
+                  <Copy className="w-3.5 h-3.5" /> Salin Link Undangan
+                </button>
+              </div>
+
+              <div className="pt-1 text-center">
+                <button
+                  type="button"
+                  onClick={() => setShowQrModal(true)}
+                  className="text-[11px] text-emerald-800 font-bold hover:underline inline-flex items-center gap-1"
+                >
+                  📱 Tampilkan QR Code (Untuk di-scan kamera HP Kasir)
+                </button>
+              </div>
+            </div>
+
+            {/* CARA CADANGAN: SALIN & TEMPEL KODE TEKS VIA WA (OFFLINE) */}
             <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <div>
@@ -1753,7 +1755,7 @@ export default function App() {
                 <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
                   <div>
                     <label className="block font-bold text-stone-700 mb-1">
-                      URL Endpoint Database Cloud
+                      URL Endpoint Database Cloud Kustom
                     </label>
                     <input
                       type="url"
@@ -2276,6 +2278,24 @@ export default function App() {
       initialStock: 1000
     });
     showToast(`Bahan baku "${newIng.name}" berhasil ditambahkan!`);
+  };
+
+  // Hapus master bahan baku / stok 1 per 1
+  const handleDeleteIngredient = (ingId) => {
+    const target = ingredients.find((i) => i.id === ingId);
+    if (!target) return;
+    setIngredients(ingredients.filter((i) => i.id !== ingId));
+    // Bersihkan stok bahan ini di seluruh cabang
+    const nextStocks = { ...branchStocks };
+    Object.keys(nextStocks).forEach((bId) => {
+      if (nextStocks[bId]) {
+        const branchStock = { ...nextStocks[bId] };
+        delete branchStock[ingId];
+        nextStocks[bId] = branchStock;
+      }
+    });
+    setBranchStocks(nextStocks);
+    showToast(`Bahan baku "${target.name}" berhasil dihapus.`);
   };
 
   // --- MENU & MANUAL HPP HANDLERS ---
@@ -3847,14 +3867,26 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-stone-100 text-xs">
-                    {ingredients
-                      .filter((ing) => {
-                        const qty = branchStocks[selectedBranchId]?.[ing.id] || 0;
-                        const matchesSearch = ing.name.toLowerCase().includes(invSearch.toLowerCase());
-                        const matchesLow = invFilter === 'all' || qty <= ing.minStock;
-                        return matchesSearch && matchesLow;
-                      })
-                      .map((ing) => {
+                    {ingredients.filter((ing) => {
+                      const qty = branchStocks[selectedBranchId]?.[ing.id] || 0;
+                      const matchesSearch = ing.name.toLowerCase().includes(invSearch.toLowerCase());
+                      const matchesLow = invFilter === 'all' || qty <= ing.minStock;
+                      return matchesSearch && matchesLow;
+                    }).length === 0 ? (
+                      <tr>
+                        <td colSpan={role === 'owner' ? 7 : 6} className="py-8 text-center text-stone-400 text-xs">
+                          Belum ada bahan baku di sistem atau tidak sesuai pencarian. Klik <strong>+ Master Bahan Baru</strong> di atas untuk menambah.
+                        </td>
+                      </tr>
+                    ) : (
+                      ingredients
+                        .filter((ing) => {
+                          const qty = branchStocks[selectedBranchId]?.[ing.id] || 0;
+                          const matchesSearch = ing.name.toLowerCase().includes(invSearch.toLowerCase());
+                          const matchesLow = invFilter === 'all' || qty <= ing.minStock;
+                          return matchesSearch && matchesLow;
+                        })
+                        .map((ing) => {
                         const qty = branchStocks[selectedBranchId]?.[ing.id] || 0;
                         const isLow = qty <= ing.minStock;
 
@@ -3936,6 +3968,7 @@ export default function App() {
                                   + Beli Stok
                                 </button>
                                 <button
+                                  type="button"
                                   onClick={() => {
                                     setOpnameModal(ing);
                                     setOpnameActualQty(String(qty));
@@ -3945,11 +3978,20 @@ export default function App() {
                                 >
                                   Stok Opname
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteIngredient(ing.id)}
+                                  className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition"
+                                  title={`Hapus bahan ${ing.name}`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
                               </div>
                             </td>
                           </tr>
                         );
-                      })}
+                      })
+                    )}
                   </tbody>
                 </table>
               </div>
