@@ -386,9 +386,24 @@ export default function App() {
 
 
 
+  // Helper to restore login session across browser refresh or Android app restart
+  const getSavedAuthSession = () => {
+    try {
+      const raw = localStorage.getItem('ramujaya_auth_session_v1');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.currentUser && parsed.currentUser.username) {
+        return parsed;
+      }
+    } catch (e) {}
+    return null;
+  };
+
+  const initialSession = useMemo(() => getSavedAuthSession(), []);
+
   // --- AUTH & USER STATE ---
   const [users, setUsers] = useState(INITIAL_USERS);
-  const [currentUser, setCurrentUser] = useState(null); // null = show login screen
+  const [currentUser, setCurrentUser] = useState(() => initialSession?.currentUser || null); // persisted across refresh
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPin, setLoginPin] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -404,9 +419,13 @@ export default function App() {
   });
 
   // --- STATE ---
-  const [role, setRole] = useState('owner'); // 'owner' | 'cashier'
-  const [activeTab, setActiveTab] = useState('pos'); // 'pos' | 'inventory' | 'recipes' | 'reports' | 'branches'
-  const [selectedBranchId, setSelectedBranchId] = useState('br-1');
+  const [role, setRole] = useState(() => initialSession?.currentUser?.role || initialSession?.role || 'owner'); // 'owner' | 'cashier'
+  const [activeTab, setActiveTab] = useState(() => {
+    const savedRole = initialSession?.currentUser?.role || initialSession?.role || 'owner';
+    if (savedRole === 'cashier') return 'pos';
+    return initialSession?.activeTab || 'pos';
+  }); // 'pos' | 'inventory' | 'recipes' | 'reports' | 'branches'
+  const [selectedBranchId, setSelectedBranchId] = useState(() => initialSession?.selectedBranchId || 'br-1');
 
   const [branches, setBranches] = useState(INITIAL_BRANCHES);
   const [ingredients, setIngredients] = useState(INITIAL_INGREDIENTS);
@@ -1403,6 +1422,25 @@ export default function App() {
     }
   }, [role, activeTab, selectedBranchId]);
 
+  // Automatically persist active login position (user, role, branch, activeTab) on refresh / app exit
+  useEffect(() => {
+    try {
+      if (currentUser) {
+        const effectiveRole = currentUser.role || role;
+        const effectiveTab = effectiveRole === 'cashier' ? 'pos' : activeTab;
+        localStorage.setItem(
+          'ramujaya_auth_session_v1',
+          JSON.stringify({
+            currentUser,
+            role: effectiveRole,
+            selectedBranchId,
+            activeTab: effectiveTab
+          })
+        );
+      }
+    } catch (e) {}
+  }, [currentUser, role, selectedBranchId, activeTab]);
+
   const handleLoginSubmit = (e) => {
     e.preventDefault();
     const found = users.find(
@@ -1414,6 +1452,8 @@ export default function App() {
       setLoginError('Username atau PIN salah! Silakan cek kembali.');
       return;
     }
+    const targetBranch =
+      found.role === 'cashier' && found.branchId !== 'ALL' ? found.branchId : selectedBranchId;
     setLoginError('');
     setCurrentUser(found);
     setRole(found.role);
@@ -1422,11 +1462,24 @@ export default function App() {
     if (found.role === 'cashier' && found.branchId !== 'ALL') {
       setSelectedBranchId(found.branchId);
     }
+    try {
+      localStorage.setItem(
+        'ramujaya_auth_session_v1',
+        JSON.stringify({
+          currentUser: found,
+          role: found.role,
+          selectedBranchId: targetBranch,
+          activeTab: 'pos'
+        })
+      );
+    } catch (err) {}
     showToast(`Selamat bertugas, ${found.name}!`);
   };
 
-
   const handleLogout = () => {
+    try {
+      localStorage.removeItem('ramujaya_auth_session_v1');
+    } catch (err) {}
     setCurrentUser(null);
     setLoginUsername('');
     setLoginPin('');
@@ -1817,18 +1870,17 @@ export default function App() {
     );
   };
 
-  const handleDeleteMenu = (menuId) => {
-    if (menus.length <= 1) {
-      showToast('Minimal harus ada 1 menu aktif di sistem!', 'error');
-      return;
-    }
+  const handleDeleteMenu = (menuId, e) => {
+    if (e && e.stopPropagation) e.stopPropagation();
     const target = menus.find((m) => m.id === menuId);
+    if (!target) return;
     const remaining = menus.filter((m) => m.id !== menuId);
     setMenus(remaining);
+    setCart((prevCart) => prevCart.filter((c) => c.menu.id !== menuId));
     if (selectedMenuForRecipe === menuId) {
       setSelectedMenuForRecipe(remaining[0]?.id || '');
     }
-    showToast(`Menu "${target?.name}" berhasil dihapus.`);
+    showToast(`Menu "${target.name}" berhasil dihapus.`);
   };
 
   const handleCreateNewMenu = (e) => {
@@ -1987,6 +2039,183 @@ export default function App() {
 
     setResetReportModal(null);
     showToast(`Riwayat laporan & mutasi (${branchLabel}) berhasil di-reset!`);
+  };
+
+  // Download Laporan Transaksi, Laba Bersih & Mutasi Stok ke File Excel (.xls)
+  const handleDownloadExcelReport = () => {
+    try {
+      const branchLabel =
+        reportBranchFilter === 'ALL'
+          ? 'Semua Cabang (Konsolidasi)'
+          : branches.find((b) => b.id === reportBranchFilter)?.name || reportBranchFilter;
+      const slug =
+        reportBranchFilter === 'ALL'
+          ? 'semua-cabang'
+          : (branches.find((b) => b.id === reportBranchFilter)?.name || 'cabang')
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-');
+      const nowDate = new Date().toISOString().slice(0, 10);
+
+      const escapeHtml = (val) =>
+        String(val ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+
+      const trxRowsHtml =
+        filteredTransactions.length === 0
+          ? '<tr><td colspan="13" style="text-align:center;">Belum ada data transaksi penjualan</td></tr>'
+          : filteredTransactions
+              .map((t, idx) => {
+                const bObj = branches.find((b) => b.id === t.branchId);
+                const bName = bObj ? `${bObj.cafeName || bObj.name} (${bObj.name})` : t.branchId;
+                const trxHpp = getTransactionHPP(t);
+                const total = Number(t.total) || 0;
+                const tax = Number(t.taxAmount) || 0;
+                const sub = Number(t.subtotal) || 0;
+                const disc = Number(t.discountAmount) || 0;
+                const labaBersih = total - tax - trxHpp;
+                const itemSummary = (t.items || [])
+                  .map((i) => `${i.qty}x ${i.name}`)
+                  .join(', ');
+                return `
+                  <tr>
+                    <td>${idx + 1}</td>
+                    <td>${escapeHtml(t.id)}</td>
+                    <td>${escapeHtml(t.timestamp)}</td>
+                    <td>${escapeHtml(bName)}</td>
+                    <td>${escapeHtml(t.cashier || '-')}</td>
+                    <td>${escapeHtml(t.customerName || 'Pelanggan Umum')}</td>
+                    <td>${escapeHtml(t.orderType || '-')}${t.tableNumber && t.tableNumber !== '-' ? ' (' + escapeHtml(t.tableNumber) + ')' : ''}</td>
+                    <td>${escapeHtml(itemSummary)}</td>
+                    <td>${escapeHtml(t.paymentMethod || '-')}</td>
+                    <td style="text-align:right;">${sub}</td>
+                    <td style="text-align:right;">${disc}</td>
+                    <td style="text-align:right;">${tax}</td>
+                    <td style="text-align:right;font-weight:bold;">${total}</td>
+                    <td style="text-align:right;">${trxHpp}</td>
+                    <td style="text-align:right;font-weight:bold;color:#047857;">${labaBersih}</td>
+                  </tr>`;
+              })
+              .join('');
+
+      const logRowsHtml =
+        filteredStockLogs.length === 0
+          ? '<tr><td colspan="9" style="text-align:center;">Belum ada riwayat mutasi stok</td></tr>'
+          : filteredStockLogs
+              .map((l, idx) => {
+                const bObj = branches.find((b) => b.id === l.branchId);
+                const bName = bObj ? `${bObj.cafeName || bObj.name} (${bObj.name})` : l.branchId;
+                const qtyChange = Number(l.qtyChange) || 0;
+                const cost = Number(l.totalCost) || 0;
+                return `
+                  <tr>
+                    <td>${idx + 1}</td>
+                    <td>${escapeHtml(l.id)}</td>
+                    <td>${escapeHtml(l.timestamp)}</td>
+                    <td>${escapeHtml(bName)}</td>
+                    <td>${escapeHtml(l.type)}</td>
+                    <td>${escapeHtml(l.ingredientName)}</td>
+                    <td style="text-align:right;font-weight:bold;">${qtyChange > 0 ? '+' + qtyChange : qtyChange} ${escapeHtml(l.unit || '')}</td>
+                    <td style="text-align:right;">${cost}</td>
+                    <td>${escapeHtml(l.supplier || '-')} — ${escapeHtml(l.note || '-')}</td>
+                  </tr>`;
+              })
+              .join('');
+
+      const excelHtml = `﻿<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <meta charset="UTF-8" />
+        <style>
+          body { font-family: Arial, sans-serif; font-size: 11pt; }
+          table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+          th, td { border: 1px solid #cbd5e1; padding: 6px 8px; }
+          th { background-color: #1c1917; color: #ffffff; font-weight: bold; text-align: left; }
+          .section-title { font-size: 13pt; font-weight: bold; margin: 14px 0 6px 0; color: #1c1917; }
+          .summary-label { font-weight: bold; background-color: #f5f5f4; width: 260px; }
+          .profit-row { background-color: #ecfdf5; font-weight: bold; color: #047857; }
+        </style>
+      </head>
+      <body>
+        <h2>LAPORAN TRANSAKSI, LABA BERSIH &amp; MUTASI STOK — RAMU JAYA POS</h2>
+        <p><strong>Cakupan Cabang:</strong> ${escapeHtml(branchLabel)} | <strong>Tanggal Unduh:</strong> ${nowDate}</p>
+
+        <div class="section-title">1. RINGKASAN KEUANGAN &amp; LABA BERSIH</div>
+        <table>
+          <tr><td class="summary-label">Total Transaksi Penjualan</td><td>${filteredTransactions.length} Struk</td></tr>
+          <tr><td class="summary-label">Total Omzet Kotor (Termasuk PB1)</td><td>Rp ${reportMetrics.totalOmzet.toLocaleString('id-ID')}</td></tr>
+          <tr><td class="summary-label">Total Pajak PB1 (10%)</td><td>Rp ${reportMetrics.totalTax.toLocaleString('id-ID')}</td></tr>
+          <tr><td class="summary-label">Penjualan Bersih (Diluar Pajak)</td><td>Rp ${reportMetrics.netRevenueExTax.toLocaleString('id-ID')}</td></tr>
+          <tr><td class="summary-label">Total Modal Pokok (HPP Menu Terjual)</td><td>Rp ${reportMetrics.totalHPP.toLocaleString('id-ID')}</td></tr>
+          <tr class="profit-row"><td class="summary-label">LABA BERSIH PENJUALAN (Omzet Bersih - HPP)</td><td>Rp ${reportMetrics.labaBersihPenjualan.toLocaleString('id-ID')}</td></tr>
+          <tr><td class="summary-label">Total Pengeluaran Belanja Restock Stok</td><td>Rp ${reportMetrics.totalRestockSpend.toLocaleString('id-ID')}</td></tr>
+          <tr class="profit-row"><td class="summary-label">SISA KAS BERSIH (Omzet - HPP - Belanja Restock)</td><td>Rp ${reportMetrics.kasBersihSetelahRestock.toLocaleString('id-ID')}</td></tr>
+        </table>
+
+        <div class="section-title">2. RIWAYAT TRANSAKSI PENJUALAN &amp; LABA BERSIH PER STRUK</div>
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>No. Struk</th>
+              <th>Waktu</th>
+              <th>Cabang</th>
+              <th>Kasir</th>
+              <th>Pelanggan</th>
+              <th>Layanan / Meja</th>
+              <th>Rincian Menu Terjual</th>
+              <th>Metode Bayar</th>
+              <th>Subtotal (Rp)</th>
+              <th>Diskon (Rp)</th>
+              <th>Pajak PB1 (Rp)</th>
+              <th>Total Omzet (Rp)</th>
+              <th>Modal HPP (Rp)</th>
+              <th>Laba Bersih (Rp)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${trxRowsHtml}
+          </tbody>
+        </table>
+
+        <div class="section-title">3. RIWAYAT LOG MUTASI &amp; BELANJA STOK BAHAN BAKU</div>
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>ID Log</th>
+              <th>Waktu</th>
+              <th>Cabang</th>
+              <th>Jenis Mutasi</th>
+              <th>Nama Bahan Baku</th>
+              <th>Perubahan Stok</th>
+              <th>Biaya Belanja (Rp)</th>
+              <th>Supplier / Keterangan</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${logRowsHtml}
+          </tbody>
+        </table>
+      </body>
+      </html>`;
+
+      const blob = new Blob([excelHtml], {
+        type: 'application/vnd.ms-excel;charset=utf-8'
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Laporan-Mutasi-RamuJaya-${slug}-${nowDate}.xls`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      showToast(`Laporan Excel (${a.download}) berhasil diunduh!`);
+    } catch (err) {
+      showToast('Gagal mengunduh file Excel.', 'error');
+    }
   };
 
   // Helper calculate total HPP for a transaction
@@ -3468,6 +3697,864 @@ export default function App() {
               </div>
             </div>
 
+          </div>
+        )}
+
+        {/* ==================== TAB 3: MENU & RESEP (MANUAL HPP & HARGA JUAL + HAPUS PER ITEM) ==================== */}
+        {activeTab === 'recipes' && (role === 'owner' || currentUser?.role === 'owner') && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Left List of Menus (5 cols) */}
+            <div className="lg:col-span-5 bg-white rounded-2xl shadow-sm border border-stone-200 p-4 space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="font-bold text-base text-stone-800">
+                    Daftar Menu & HPP ({menus.length} Item)
+                  </h2>
+                  <p className="text-xs text-stone-500">
+                    Klik menu untuk edit, atau klik ikon tempat sampah untuk hapus per item
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setNewMenuModal(true)}
+                  className="px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1 shadow-sm shrink-0"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Menu Baru
+                </button>
+              </div>
+
+              {menus.length === 0 ? (
+                <div className="p-8 text-center bg-stone-50 rounded-2xl border border-dashed border-stone-300 space-y-3">
+                  <p className="text-xs font-bold text-stone-600">
+                    Belum ada daftar menu di sistem.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setNewMenuModal(true)}
+                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-4 h-4" /> Tambah Menu Pertama
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {menus.map((m) => {
+                    const hpp = calculateMenuHPP(m);
+                    const price = Number(m.price) || 0;
+                    const margin = price - hpp;
+                    const marginPct = price > 0 ? Math.round((margin / price) * 100) : 0;
+                    const isSelected = (activeMenuRecipeObj?.id || selectedMenuForRecipe) === m.id;
+
+                    return (
+                      <div
+                        key={m.id}
+                        onClick={() => setSelectedMenuForRecipe(m.id)}
+                        className={`p-3.5 rounded-xl border cursor-pointer transition flex items-center justify-between gap-2 ${
+                          isSelected
+                            ? 'bg-amber-50/70 border-amber-600 shadow-sm'
+                            : 'bg-white border-stone-200 hover:bg-stone-50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="p-2 rounded-lg bg-stone-100 shrink-0">
+                            {renderMenuIcon(m.icon)}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-bold text-sm text-stone-800 truncate">{m.name}</p>
+                            <p className="text-xs text-stone-500 truncate">
+                              Jual: <strong className="text-stone-800">{formatRp(price)}</strong> •{' '}
+                              {m.category}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="text-right">
+                            <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              Margin {marginPct}%
+                            </span>
+                            <p className="text-[11px] text-stone-500 mt-1">HPP: {formatRp(hpp)}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => handleDeleteMenu(m.id, e)}
+                            className="p-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition"
+                            title={`Hapus menu ${m.name}`}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Right Manual Editor for HPP & Harga Jual (7 cols) */}
+            {activeMenuRecipeObj ? (
+              <div className="lg:col-span-7 bg-white rounded-2xl shadow-sm border border-stone-200 p-5 space-y-5">
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-stone-100 pb-4">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-amber-700">
+                      Pengaturan Harga & HPP Manual (Tanpa Komposisi)
+                    </span>
+                    <h3 className="text-xl font-extrabold text-stone-900 mt-0.5">
+                      {activeMenuRecipeObj.name}
+                    </h3>
+                    <p className="text-xs text-stone-500 mt-0.5">
+                      Masukkan nilai HPP (Harga Pokok Penjualan) dan Harga Jual secara langsung tanpa rincian komposisi bahan.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => handleDeleteMenu(activeMenuRecipeObj.id, e)}
+                    className="px-3.5 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold flex items-center gap-1.5 border border-red-200 transition"
+                  >
+                    <Trash2 className="w-4 h-4" /> Hapus Item Menu Ini
+                  </button>
+                </div>
+
+                {/* Form Input Manual */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 mb-1.5">
+                      Nama Menu
+                    </label>
+                    <input
+                      type="text"
+                      value={activeMenuRecipeObj.name || ''}
+                      onChange={(e) =>
+                        handleUpdateMenuField(activeMenuRecipeObj.id, 'name', e.target.value)
+                      }
+                      className="w-full px-3.5 py-2.5 text-sm font-semibold bg-stone-50 border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 mb-1.5">
+                      Kategori Menu
+                    </label>
+                    <select
+                      value={activeMenuRecipeObj.category || 'Kopi'}
+                      onChange={(e) =>
+                        handleUpdateMenuField(activeMenuRecipeObj.id, 'category', e.target.value)
+                      }
+                      className="w-full px-3.5 py-2.5 text-sm font-semibold bg-stone-50 border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    >
+                      <option value="Kopi">Kopi</option>
+                      <option value="Non-Kopi">Non-Kopi</option>
+                      <option value="Pastry & Snack">Pastry & Snack</option>
+                      <option value="Makanan Berat">Makanan Berat</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 mb-1.5">
+                      HPP Manual per Porsi (Rp)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={activeMenuRecipeObj.hpp ?? 0}
+                      onChange={(e) =>
+                        handleUpdateMenuField(activeMenuRecipeObj.id, 'hpp', e.target.value)
+                      }
+                      placeholder="Masukkan HPP..."
+                      className="w-full px-3.5 py-2.5 text-sm font-extrabold bg-stone-50 border border-stone-300 rounded-xl text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                    <p className="text-[11px] text-stone-400 mt-1">
+                      Modal pokok per porsi yang diinput secara manual.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 mb-1.5">
+                      Harga Jual Kasir (Rp)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={activeMenuRecipeObj.price ?? 0}
+                      onChange={(e) =>
+                        handleUpdateMenuField(activeMenuRecipeObj.id, 'price', e.target.value)
+                      }
+                      placeholder="Masukkan Harga Jual..."
+                      className="w-full px-3.5 py-2.5 text-sm font-extrabold bg-amber-50/60 border border-amber-300 rounded-xl text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                    <p className="text-[11px] text-stone-400 mt-1">
+                      Harga yang tampil pada halaman Kasir (POS) di semua cabang.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Ringkasan Laba Kotor & Margin */}
+                <div className="bg-stone-50 p-4 rounded-2xl border border-stone-200 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="p-3 bg-white rounded-xl border border-stone-200/80">
+                    <span className="text-[11px] text-stone-500 block">HPP Manual</span>
+                    <span className="text-base font-extrabold text-stone-800">
+                      {formatRp(activeMenuRecipeObj.hpp)}
+                    </span>
+                  </div>
+                  <div className="p-3 bg-white rounded-xl border border-stone-200/80">
+                    <span className="text-[11px] text-stone-500 block">Harga Jual</span>
+                    <span className="text-base font-extrabold text-amber-700">
+                      {formatRp(activeMenuRecipeObj.price)}
+                    </span>
+                  </div>
+                  <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                    <span className="text-[11px] text-emerald-700 font-semibold block">
+                      Estimasi Laba Kotor / Porsi
+                    </span>
+                    <span className="text-base font-extrabold text-emerald-800">
+                      {formatRp((Number(activeMenuRecipeObj.price) || 0) - (Number(activeMenuRecipeObj.hpp) || 0))}{' '}
+                      <span className="text-xs font-bold">
+                        (
+                        {Number(activeMenuRecipeObj.price) > 0
+                          ? Math.round(
+                              (((Number(activeMenuRecipeObj.price) || 0) -
+                                (Number(activeMenuRecipeObj.hpp) || 0)) /
+                                Number(activeMenuRecipeObj.price)) *
+                                100
+                            )
+                          : 0}
+                        %)
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="lg:col-span-7 bg-white rounded-2xl shadow-sm border border-stone-200 p-8 text-center space-y-3">
+                <p className="text-sm font-bold text-stone-700">
+                  Pilih item menu di sebelah kiri atau tambahkan menu baru.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setNewMenuModal(true)}
+                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" /> Tambah Menu Kafe Baru
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ==================== TAB 4: LAPORAN & MUTASI ==================== */}
+        {activeTab === 'reports' && (
+          <div className="space-y-6">
+            {/* Filter, Download Excel & Reset Action Bar */}
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-stone-200 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-bold text-base text-stone-800">
+                  Laporan Transaksi, Laba Bersih & Riwayat Mutasi Stok
+                </h2>
+                <p className="text-xs text-stone-500">
+                  Pantau omzet, potongan HPP, laba bersih, download ke Excel (.xls), atau reset riwayat laporan.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-2 bg-stone-100 px-3 py-1.5 rounded-xl border border-stone-200">
+                  <Filter className="w-4 h-4 text-stone-500" />
+                  <span className="text-xs font-semibold text-stone-600">Cabang:</span>
+                  <select
+                    value={reportBranchFilter}
+                    onChange={(e) => setReportBranchFilter(e.target.value)}
+                    disabled={role === 'cashier'}
+                    className="text-xs font-bold bg-transparent text-stone-900 focus:outline-none cursor-pointer"
+                  >
+                    {role === 'owner' && <option value="ALL">Semua Cabang (Konsolidasi)</option>}
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.cafeName || ''})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadExcelReport}
+                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Download Excel (.xls)
+                </button>
+
+                {role === 'owner' && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setResetReportModal({
+                        scope: reportBranchFilter,
+                        target: 'all'
+                      })
+                    }
+                    className="px-3.5 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-bold flex items-center gap-1.5 transition"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Reset Riwayat
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* KPI Summary Cards (5 Cards including Total HPP & Laba Bersih) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
+                <div className="flex items-center justify-between text-stone-400 mb-1">
+                  <span className="text-[11px] font-bold uppercase">Total Omzet Kotor</span>
+                  <DollarSign className="w-4 h-4 text-amber-600" />
+                </div>
+                <p className="text-lg font-extrabold text-stone-900">
+                  {formatRp(reportMetrics.totalOmzet)}
+                </p>
+                <p className="text-[11px] text-stone-500 mt-1">
+                  {filteredTransactions.length} transaksi (Termasuk PB1{' '}
+                  {formatRp(reportMetrics.totalTax)})
+                </p>
+              </div>
+
+              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
+                <div className="flex items-center justify-between text-stone-400 mb-1">
+                  <span className="text-[11px] font-bold uppercase">Total Modal HPP</span>
+                  <Layers className="w-4 h-4 text-rose-600" />
+                </div>
+                <p className="text-lg font-extrabold text-stone-900">
+                  {formatRp(reportMetrics.totalHPP)}
+                </p>
+                <p className="text-[11px] text-stone-500 mt-1">
+                  Akumulasi HPP dari menu terjual
+                </p>
+              </div>
+
+              <div className="bg-emerald-50/90 p-4 rounded-2xl border border-emerald-300 shadow-sm">
+                <div className="flex items-center justify-between text-emerald-800 mb-1">
+                  <span className="text-[11px] font-extrabold uppercase">Laba Bersih Penjualan</span>
+                  <TrendingUp className="w-4 h-4 text-emerald-600" />
+                </div>
+                <p className="text-xl font-extrabold text-emerald-800">
+                  {formatRp(reportMetrics.labaBersihPenjualan)}
+                </p>
+                <p className="text-[11px] text-emerald-700 font-semibold mt-1">
+                  Penjualan Bersih ({formatRp(reportMetrics.netRevenueExTax)}) - HPP
+                </p>
+              </div>
+
+              <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
+                <div className="flex items-center justify-between text-stone-400 mb-1">
+                  <span className="text-[11px] font-bold uppercase">Belanja Restock Stok</span>
+                  <Package className="w-4 h-4 text-blue-600" />
+                </div>
+                <p className="text-lg font-extrabold text-stone-900">
+                  {formatRp(reportMetrics.totalRestockSpend)}
+                </p>
+                <p className="text-[11px] text-stone-500 mt-1">
+                  Pengeluaran belanja bahan cabang
+                </p>
+              </div>
+
+              <div className="bg-stone-900 text-white p-4 rounded-2xl border border-stone-800 shadow-sm">
+                <div className="flex items-center justify-between text-amber-300 mb-1">
+                  <span className="text-[11px] font-bold uppercase">Sisa Kas Bersih</span>
+                  <Receipt className="w-4 h-4 text-amber-400" />
+                </div>
+                <p className="text-lg font-extrabold text-amber-300">
+                  {formatRp(reportMetrics.kasBersihSetelahRestock)}
+                </p>
+                <p className="text-[11px] text-stone-400 mt-1">
+                  Omzet - HPP - Belanja Restock
+                </p>
+              </div>
+            </div>
+
+            {/* Charts Section */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              <div className="lg:col-span-8 bg-white p-5 rounded-2xl border border-stone-200 shadow-sm">
+                <h3 className="font-bold text-sm text-stone-800 mb-1">
+                  Perbandingan Omzet, Laba Bersih & Belanja Restock per Cabang
+                </h3>
+                <p className="text-xs text-stone-500 mb-4">
+                  Pantau kontribusi laba bersih setiap cabang kafe secara langsung
+                </p>
+                <div className="relative h-72 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={branchComparisonData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
+                      <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                      <YAxis tick={{ fontSize: 11 }} />
+                      <Tooltip formatter={(val) => formatRp(val)} />
+                      <Legend />
+                      <Bar dataKey="Omzet" name="Omzet Penjualan" fill="#d97706" radius={[6, 6, 0, 0]} />
+                      <Bar dataKey="LabaBersih" name="Laba Bersih" fill="#059669" radius={[6, 6, 0, 0]} />
+                      <Bar
+                        dataKey="BelanjaStok"
+                        name="Belanja Restock"
+                        fill="#2563eb"
+                        radius={[6, 6, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              <div className="lg:col-span-4 bg-white p-5 rounded-2xl border border-stone-200 shadow-sm">
+                <h3 className="font-bold text-sm text-stone-800 mb-1">Metode Pembayaran</h3>
+                <p className="text-xs text-stone-500 mb-4">Proporsi Tunai, QRIS, dan Debit</p>
+                <div className="relative h-72 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={paymentMethodPieData}
+                        dataKey="value"
+                        nameKey="name"
+                        cx="50%"
+                        cy="50%"
+                        outerRadius={80}
+                        label={({ name }) => name}
+                      >
+                        {paymentMethodPieData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip formatter={(val) => formatRp(val)} />
+                      <Legend />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+
+            {/* Dual Tables: Transaction History & Stock Mutation Log */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Transaction History */}
+              <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-stone-100 flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-stone-800">Riwayat Transaksi & Laba</h3>
+                    <span className="text-[11px] text-stone-400">
+                      Menampilkan Omzet, HPP & Laba Bersih per struk
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleDownloadExcelReport}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-[11px] font-bold border border-emerald-200 flex items-center gap-1"
+                    >
+                      <Download className="w-3 h-3" /> Excel
+                    </button>
+                    {role === 'owner' && filteredTransactions.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setResetReportModal({
+                            scope: reportBranchFilter,
+                            target: 'trx'
+                          })
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[11px] font-bold border border-red-200 flex items-center gap-1"
+                      >
+                        <Trash2 className="w-3 h-3" /> Reset Transaksi
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="overflow-x-auto max-h-96">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-stone-50 text-stone-500 uppercase text-[11px] border-b border-stone-200">
+                        <th className="py-2.5 px-3">ID / Waktu</th>
+                        <th className="py-2.5 px-3">Cabang</th>
+                        <th className="py-2.5 px-3 text-right">Omzet</th>
+                        <th className="py-2.5 px-3 text-right">Laba Bersih</th>
+                        <th className="py-2.5 px-3 text-right">Struk</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-stone-100">
+                      {filteredTransactions.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-8 text-center text-stone-400 text-xs">
+                            Belum ada riwayat transaksi pada filter ini.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredTransactions.map((t) => {
+                          const bName =
+                            branches
+                              .find((b) => b.id === t.branchId)
+                              ?.name.replace('Cabang ', '') || t.branchId;
+                          const trxHpp = getTransactionHPP(t);
+                          const trxLabaBersih = (Number(t.total) || 0) - (Number(t.taxAmount) || 0) - trxHpp;
+                          return (
+                            <tr key={t.id} className="hover:bg-stone-50">
+                              <td className="py-2.5 px-3">
+                                <p className="font-bold text-stone-800">{t.id}</p>
+                                <p className="text-[11px] text-stone-400">
+                                  {t.timestamp} • {t.paymentMethod}
+                                </p>
+                              </td>
+                              <td className="py-2.5 px-3 font-medium text-stone-700">{bName}</td>
+                              <td className="py-2.5 px-3 text-right">
+                                <p className="font-bold text-stone-900">{formatRp(t.total)}</p>
+                                <p className="text-[10px] text-stone-400">HPP: {formatRp(trxHpp)}</p>
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-extrabold text-emerald-700">
+                                +{formatRp(trxLabaBersih)}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveReceipt(t)}
+                                  className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold text-[11px]"
+                                >
+                                  Lihat
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Stock Logs */}
+              <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-stone-100 flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-stone-800">
+                      Log Mutasi Stok & Belanja Bahan
+                    </h3>
+                    <span className="text-[11px] text-stone-400">
+                      Riwayat belanja stok, transfer & opname cabang
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleDownloadExcelReport}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-[11px] font-bold border border-emerald-200 flex items-center gap-1"
+                    >
+                      <Download className="w-3 h-3" /> Excel
+                    </button>
+                    {role === 'owner' && filteredStockLogs.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setResetReportModal({
+                            scope: reportBranchFilter,
+                            target: 'logs'
+                          })
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[11px] font-bold border border-red-200 flex items-center gap-1"
+                      >
+                        <Trash2 className="w-3 h-3" /> Reset Mutasi
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="overflow-x-auto max-h-96">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-stone-50 text-stone-500 uppercase text-[11px] border-b border-stone-200">
+                        <th className="py-2.5 px-3">Waktu / Cabang</th>
+                        <th className="py-2.5 px-3">Bahan & Jenis</th>
+                        <th className="py-2.5 px-3 text-right">Perubahan</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-stone-100">
+                      {filteredStockLogs.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="py-8 text-center text-stone-400 text-xs">
+                            Belum ada riwayat mutasi stok pada filter ini.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredStockLogs.map((log) => {
+                          const bName =
+                            branches
+                              .find((b) => b.id === log.branchId)
+                              ?.name.replace('Cabang ', '') || log.branchId;
+                          const isPositive = (Number(log.qtyChange) || 0) > 0;
+                          return (
+                            <tr key={log.id} className="hover:bg-stone-50">
+                              <td className="py-2.5 px-3">
+                                <p className="font-semibold text-stone-700">{bName}</p>
+                                <p className="text-[11px] text-stone-400">{log.timestamp}</p>
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <p className="font-bold text-stone-800">{log.ingredientName}</p>
+                                <p className="text-[11px] text-stone-500">
+                                  <span className="font-semibold">{log.type}</span> — {log.note}
+                                </p>
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <span
+                                  className={`font-extrabold ${
+                                    isPositive ? 'text-emerald-600' : 'text-red-600'
+                                  }`}
+                                >
+                                  {isPositive ? `+${log.qtyChange}` : log.qtyChange} {log.unit}
+                                </span>
+                                {(Number(log.totalCost) || 0) > 0 && (
+                                  <p className="text-[11px] text-stone-500">
+                                    Biaya: {formatRp(log.totalCost)}
+                                  </p>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================== TAB 5: KELOLA CABANG & AKUN ==================== */}
+        {activeTab === 'branches' && (role === 'owner' || currentUser?.role === 'owner') && (
+          <div className="space-y-5">
+            <div className="bg-white p-5 rounded-2xl border border-stone-200 shadow-sm flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-bold text-base text-stone-800">
+                  Daftar Cabang Kafe ({branches.length} Lokasi)
+                </h2>
+                <p className="text-xs text-stone-500">
+                  Setiap cabang memiliki inventori bahan baku independen, meja kasir, dan laporan masing-masing.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNewBranchModal(true)}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm"
+              >
+                <Plus className="w-4 h-4" /> Buka / Tambah Cabang Baru
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {branches.map((b) => {
+                const bTrx = transactions.filter((t) => t.branchId === b.id);
+                const bOmzet = bTrx.reduce((acc, t) => acc + (Number(t.total) || 0), 0);
+                const stocks = branchStocks[b.id] || {};
+                const lowCount = ingredients.filter((i) => (stocks[i.id] || 0) <= i.minStock).length;
+
+                return (
+                  <div
+                    key={b.id}
+                    className={`bg-white rounded-2xl p-5 border transition flex flex-col justify-between ${
+                      selectedBranchId === b.id
+                        ? 'border-amber-600 ring-2 ring-amber-500/20'
+                        : 'border-stone-200'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-2 mb-3">
+                        <div className="p-2.5 rounded-xl bg-stone-100 text-stone-800">
+                          <Store className="w-5 h-5" />
+                        </div>
+                        {selectedBranchId === b.id && (
+                          <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800">
+                            Sedang Aktif
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 block">
+                            {b.name}
+                          </span>
+                          <h3 className="font-extrabold text-base text-stone-900">
+                            {b.cafeName || b.name}
+                          </h3>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setEditBranchModal({ ...b })}
+                          className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-[11px] font-bold flex items-center gap-1 shrink-0 transition"
+                          title="Ganti Nama Cafe & Nama di Struk"
+                        >
+                          <Edit3 className="w-3 h-3" /> Edit Nama & Struk
+                        </button>
+                      </div>
+
+                      <div className="mt-2 px-2.5 py-1.5 rounded-lg bg-stone-100 border border-stone-200/80 text-[11px] flex items-center justify-between">
+                        <span className="text-stone-500">Judul di Struk:</span>
+                        <span className="font-mono font-bold text-stone-800">
+                          {b.receiptName || b.cafeName || b.name}
+                        </span>
+                      </div>
+
+                      <p className="text-xs text-stone-500 flex items-center gap-1 mt-2">
+                        <MapPin className="w-3.5 h-3.5 shrink-0" /> {b.address}
+                      </p>
+                      <p className="text-xs text-stone-500 flex items-center gap-1 mt-1">
+                        <Users className="w-3.5 h-3.5 shrink-0" /> Kepala Cabang:{' '}
+                        <strong className="text-stone-700">{b.manager}</strong> ({b.tables} Meja)
+                      </p>
+
+                      <div className="mt-4 pt-3 border-t border-stone-100 grid grid-cols-2 gap-2 text-xs">
+                        <div className="bg-stone-50 p-2.5 rounded-xl">
+                          <span className="text-[11px] text-stone-400 block">Omzet Hari Ini</span>
+                          <span className="font-extrabold text-stone-800">{formatRp(bOmzet)}</span>
+                        </div>
+                        <div className="bg-stone-50 p-2.5 rounded-xl">
+                          <span className="text-[11px] text-stone-400 block">Status Bahan</span>
+                          {lowCount > 0 ? (
+                            <span className="font-bold text-red-600">{lowCount} Perlu Restock</span>
+                          ) : (
+                            <span className="font-bold text-emerald-600">Semua Aman</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-stone-100 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedBranchId(b.id);
+                          setActiveTab('pos');
+                        }}
+                        className="flex-1 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold transition"
+                      >
+                        Buka Kasir Cabang
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedBranchId(b.id);
+                          setActiveTab('inventory');
+                        }}
+                        className="flex-1 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold transition"
+                      >
+                        Cek Stok
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteBranchModal(b)}
+                        className="p-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition"
+                        title="Hapus / Tutup Cabang Ini"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Manajemen Akun Karyawan & Admin */}
+            <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden mt-6">
+              <div className="p-5 border-b border-stone-100 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-base text-stone-800">
+                    Manajemen Akun Login Karyawan & Admin
+                  </h3>
+                  <p className="text-xs text-stone-500">
+                    Akun berstatus <strong>Karyawan Kasir</strong> otomatis dibatasi hanya untuk melakukan transaksi penjualan (POS) di cabang penugasannya.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewUserForm({
+                      name: '',
+                      username: '',
+                      pin: '',
+                      role: 'cashier',
+                      branchId: selectedBranchId
+                    });
+                    setNewUserModal(true);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 text-xs font-bold flex items-center gap-1.5 shadow-sm"
+                >
+                  <UserPlus className="w-4 h-4" /> + Tambah Akun Karyawan / Admin
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-stone-100/80 text-stone-600 uppercase text-[11px] font-bold border-b border-stone-200">
+                      <th className="py-3 px-4">Nama Lengkap</th>
+                      <th className="py-3 px-4">Username</th>
+                      <th className="py-3 px-4">PIN Login</th>
+                      <th className="py-3 px-4">Peran & Hak Akses</th>
+                      <th className="py-3 px-4">Cabang Penugasan</th>
+                      <th className="py-3 px-4 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {users.map((u) => {
+                      const isOwner = u.role === 'owner';
+                      const bName =
+                        u.branchId === 'ALL'
+                          ? 'Semua Cabang (Pusat)'
+                          : branches.find((b) => b.id === u.branchId)?.name || u.branchId;
+                      return (
+                        <tr key={u.id} className="hover:bg-stone-50">
+                          <td className="py-3 px-4 font-bold text-stone-800">{u.name}</td>
+                          <td className="py-3 px-4 font-mono text-stone-700">{u.username}</td>
+                          <td className="py-3 px-4 font-mono text-stone-600">
+                            <div className="flex items-center gap-1.5">
+                              <span>{showPinMap[u.id] ? u.pin : '••••'}</span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setShowPinMap({ ...showPinMap, [u.id]: !showPinMap[u.id] })
+                                }
+                                className="text-stone-400 hover:text-stone-700"
+                                title={showPinMap[u.id] ? 'Sembunyikan PIN' : 'Lihat PIN'}
+                              >
+                                {showPinMap[u.id] ? (
+                                  <EyeOff className="w-3.5 h-3.5" />
+                                ) : (
+                                  <Eye className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4">
+                            {isOwner ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                <ShieldCheck className="w-3 h-3" /> Admin / Owner (Akses Penuh)
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                                <UserCheck className="w-3 h-3" /> Karyawan (Hanya Transaksi POS)
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 font-medium text-stone-700">{bName}</td>
+                          <td className="py-3 px-4 text-right">
+                            {u.id !== currentUser?.id ? (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteUser(u.id)}
+                                className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 font-semibold text-[11px]"
+                              >
+                                Hapus
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-stone-400 italic">Sedang Login</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         )}
           </main>
