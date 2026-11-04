@@ -51,7 +51,10 @@ import {
   Share2,
   Menu,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Cloud,
+  CloudOff,
+  Database
 } from 'lucide-react';
 import {
   BarChart,
@@ -133,6 +136,45 @@ const INITIAL_USERS = [
     name: 'Bagas (Kasir Malang)',
     role: 'cashier',
     branchId: 'br-3'
+  }
+];
+
+const INITIAL_LICENSES = [
+  {
+    id: 'lic-master',
+    code: 'RJPOS-MASTER-9999',
+    holderName: 'Owner / Admin Utama',
+    branchId: 'ALL',
+    status: 'active',
+    expiryDate: 'SEUMUR HIDUP',
+    createdAt: '2026-10-24'
+  },
+  {
+    id: 'lic-1',
+    code: 'RJPOS-SDA01-2026',
+    holderName: 'Perangkat Kasir Sidoarjo',
+    branchId: 'br-1',
+    status: 'active',
+    expiryDate: '2027-12-31',
+    createdAt: '2026-10-24'
+  },
+  {
+    id: 'lic-2',
+    code: 'RJPOS-SBY02-2026',
+    holderName: 'Perangkat Kasir Gubeng',
+    branchId: 'br-2',
+    status: 'active',
+    expiryDate: '2027-12-31',
+    createdAt: '2026-10-24'
+  },
+  {
+    id: 'lic-3',
+    code: 'RJPOS-MLG03-2026',
+    holderName: 'Perangkat Kasir Malang',
+    branchId: 'br-3',
+    status: 'active',
+    expiryDate: '2027-12-31',
+    createdAt: '2026-10-24'
   }
 ];
 
@@ -368,6 +410,29 @@ const formatRp = (num) => {
 const COLORS = ['#d97706', '#059669', '#2563eb', '#7c3aed', '#db2777'];
 
 export default function App() {
+  // --- MULTI-TENANT WORKSPACE & REAL-TIME CLOUD SYNC STATE ---
+  const [workspaceId, setWorkspaceId] = useState('RAMUJAYA-PUSAT');
+  const [cloudEndpoint, setCloudEndpoint] = useState('');
+  const [cloudSecret, setCloudSecret] = useState('');
+  const [cloudStatus, setCloudStatus] = useState('local'); // 'local' | 'syncing' | 'connected' | 'error'
+  const [lastSyncTime, setLastSyncTime] = useState('-');
+  const [cloudModal, setCloudModal] = useState(false);
+  const [isApplyingRemote, setIsApplyingRemote] = useState(false);
+
+  // --- LICENSE & DEVICE ACTIVATION STATE ---
+  const [licenses, setLicenses] = useState(INITIAL_LICENSES);
+  const [activatedLicenseCode, setActivatedLicenseCode] = useState('');
+  const [licenseInput, setLicenseInput] = useState('');
+  const [licenseError, setLicenseError] = useState('');
+  const [showLicenseGate, setShowLicenseGate] = useState(false);
+  const [newLicenseModal, setNewLicenseModal] = useState(false);
+  const [newLicenseForm, setNewLicenseForm] = useState({
+    code: '',
+    holderName: '',
+    branchId: 'ALL',
+    expiryDate: '2027-12-31'
+  });
+
   // --- AUTH & USER STATE ---
   const [users, setUsers] = useState(INITIAL_USERS);
   const [currentUser, setCurrentUser] = useState(null); // null = show login screen
@@ -912,44 +977,246 @@ export default function App() {
     }
   };
 
-  // Load saved state from localStorage (Single-Site Unified Database Simulation)
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('ramujaya_unified_portal_v3');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.branches) setBranches(parsed.branches);
-        if (parsed.ingredients) setIngredients(parsed.ingredients);
-        if (parsed.branchStocks) setBranchStocks(parsed.branchStocks);
-        if (parsed.menus) setMenus(parsed.menus);
-        if (parsed.transactions) setTransactions(parsed.transactions);
-        if (parsed.stockLogs) setStockLogs(parsed.stockLogs);
-        if (parsed.users) setUsers(parsed.users);
-      }
-    } catch (err) {
-      // Ignore storage errors in restricted environments
-    }
-  }, []);
+  // Apply a data snapshot into state safely
+  const applyWorkspaceSnapshot = (parsed) => {
+    if (!parsed || typeof parsed !== 'object') return;
+    setIsApplyingRemote(true);
+    if (Array.isArray(parsed.branches) && parsed.branches.length > 0) setBranches(parsed.branches);
+    if (Array.isArray(parsed.ingredients)) setIngredients(parsed.ingredients);
+    if (parsed.branchStocks) setBranchStocks(parsed.branchStocks);
+    if (Array.isArray(parsed.menus)) setMenus(parsed.menus);
+    if (Array.isArray(parsed.transactions)) setTransactions(parsed.transactions);
+    if (Array.isArray(parsed.stockLogs)) setStockLogs(parsed.stockLogs);
+    if (Array.isArray(parsed.users) && parsed.users.length > 0) setUsers(parsed.users);
+    if (Array.isArray(parsed.licenses)) setLicenses(parsed.licenses);
+    setTimeout(() => setIsApplyingRemote(false), 120);
+  };
 
-  // Save state changes to localStorage automatically
+  // Load saved workspace config & local cache on startup or when workspaceId changes
   useEffect(() => {
     try {
-      localStorage.setItem(
-        'ramujaya_unified_portal_v3',
-        JSON.stringify({
-          branches,
-          ingredients,
-          branchStocks,
-          menus,
-          transactions,
-          stockLogs,
-          users
-        })
-      );
+      const savedCfg = localStorage.getItem('ramujaya_cloud_config_v1');
+      let activeWs = workspaceId;
+      if (savedCfg) {
+        const cfg = JSON.parse(savedCfg);
+        if (cfg.workspaceId) {
+          activeWs = cfg.workspaceId;
+          setWorkspaceId(cfg.workspaceId);
+        }
+        if (cfg.cloudEndpoint) setCloudEndpoint(cfg.cloudEndpoint);
+        if (cfg.cloudSecret) setCloudSecret(cfg.cloudSecret);
+      }
+
+      const storageKey = `ramujaya_ws_v3_${activeWs}`;
+      const saved = localStorage.getItem(storageKey) || localStorage.getItem('ramujaya_unified_portal_v3');
+      if (saved) {
+        applyWorkspaceSnapshot(JSON.parse(saved));
+      }
+
+      const savedDeviceLic = localStorage.getItem('ramujaya_device_license_v1');
+      if (savedDeviceLic) {
+        setActivatedLicenseCode(savedDeviceLic);
+      }
     } catch (err) {
       // Ignore storage errors
     }
-  }, [branches, ingredients, branchStocks, menus, transactions, stockLogs, users]);
+  }, []);
+
+  // Listen for real-time changes across browser tabs / windows on the same device
+  useEffect(() => {
+    const storageKey = `ramujaya_ws_v3_${workspaceId}`;
+    const handleStorageEvent = (e) => {
+      if (e.key === storageKey && e.newValue) {
+        try {
+          applyWorkspaceSnapshot(JSON.parse(e.newValue));
+          setLastSyncTime(new Date().toTimeString().slice(0, 8));
+        } catch (err) {
+          // ignore
+        }
+      }
+    };
+    window.addEventListener('storage', handleStorageEvent);
+    return () => window.removeEventListener('storage', handleStorageEvent);
+  }, [workspaceId]);
+
+  // Build clean URL for Cloud Database (Supports Firebase Realtime DB, JSONBin, or Custom REST API)
+  const getCloudWorkspaceUrl = () => {
+    const base = cloudEndpoint.trim().replace(/\/+$/, '');
+    if (!base) return '';
+    const cleanWs = workspaceId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'DEFAULT';
+    if (base.includes('firebaseio.com') || base.includes('firebasedatabase.app')) {
+      const authParam = cloudSecret.trim() ? `?auth=${encodeURIComponent(cloudSecret.trim())}` : '';
+      return `${base}/ramujaya_workspaces/${cleanWs}.json${authParam}`;
+    }
+    return `${base}/${cleanWs}`;
+  };
+
+  // Pull latest data from Cloud Database (Multi-Device Sync: HP Admin <-> HP Kasir)
+  const pullFromCloud = async (silent = false) => {
+    const url = getCloudWorkspaceUrl();
+    if (!url) return;
+    try {
+      if (!silent) setCloudStatus('syncing');
+      const headers = {};
+      if (cloudSecret.trim() && !url.includes('firebase')) {
+        headers['X-Master-Key'] = cloudSecret.trim();
+        headers['Authorization'] = `Bearer ${cloudSecret.trim()}`;
+      }
+      const res = await fetch(url, { method: 'GET', headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const payload = data?.record ? data.record : data;
+      if (payload && payload.branches) {
+        applyWorkspaceSnapshot(payload);
+        const storageKey = `ramujaya_ws_v3_${workspaceId}`;
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(payload));
+        } catch (e) {}
+      }
+      setCloudStatus('connected');
+      setLastSyncTime(new Date().toTimeString().slice(0, 8));
+      if (!silent) showToast(`Data Workspace "${workspaceId}" berhasil disinkronkan dari Cloud!`);
+    } catch (err) {
+      setCloudStatus('error');
+      if (!silent) {
+        showToast(`Gagal menarik data Cloud: Pastikan URL Database Cloud benar.`, 'error');
+      }
+    }
+  };
+
+  // Push local changes to Cloud Database automatically & save to local storage
+  const pushToCloud = async (snapshotPayload, silent = true) => {
+    const url = getCloudWorkspaceUrl();
+    if (!url) {
+      setCloudStatus('local');
+      return;
+    }
+    try {
+      setCloudStatus('syncing');
+      const headers = { 'Content-Type': 'application/json' };
+      if (cloudSecret.trim() && !url.includes('firebase')) {
+        headers['X-Master-Key'] = cloudSecret.trim();
+        headers['Authorization'] = `Bearer ${cloudSecret.trim()}`;
+      }
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(snapshotPayload)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setCloudStatus('connected');
+      setLastSyncTime(new Date().toTimeString().slice(0, 8));
+      if (!silent) showToast(`Data berhasil di-upload ke Cloud (${workspaceId})!`);
+    } catch (err) {
+      setCloudStatus('error');
+      if (!silent) showToast('Gagal mengirim data ke Cloud Database!', 'error');
+    }
+  };
+
+  // Auto-save to localStorage and push to Cloud when state changes
+  useEffect(() => {
+    if (isApplyingRemote) return;
+    const payload = {
+      updatedAt: Date.now(),
+      workspaceId,
+      branches,
+      ingredients,
+      branchStocks,
+      menus,
+      transactions,
+      stockLogs,
+      users,
+      licenses
+    };
+    try {
+      const storageKey = `ramujaya_ws_v3_${workspaceId}`;
+      localStorage.setItem(storageKey, JSON.stringify(payload));
+      localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(payload));
+    } catch (err) {
+      // Ignore storage errors
+    }
+    if (cloudEndpoint.trim()) {
+      const timer = setTimeout(() => {
+        pushToCloud(payload, true);
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [branches, ingredients, branchStocks, menus, transactions, stockLogs, users, licenses, workspaceId]);
+
+  // Periodic background polling every 6 seconds when Cloud Endpoint is configured so Admin HP sees Cashier HP transactions live
+  useEffect(() => {
+    if (!cloudEndpoint.trim()) {
+      setCloudStatus('local');
+      return;
+    }
+    pullFromCloud(true);
+    const interval = setInterval(() => {
+      pullFromCloud(true);
+    }, 6000);
+    return () => clearInterval(interval);
+  }, [cloudEndpoint, workspaceId, cloudSecret]);
+
+  const handleSaveCloudConfig = (e) => {
+    e.preventDefault();
+    const cleanWs = workspaceId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'RAMUJAYA-PUSAT';
+    setWorkspaceId(cleanWs);
+    try {
+      localStorage.setItem(
+        'ramujaya_cloud_config_v1',
+        JSON.stringify({
+          workspaceId: cleanWs,
+          cloudEndpoint: cloudEndpoint.trim(),
+          cloudSecret: cloudSecret.trim()
+        })
+      );
+    } catch (err) {}
+    setCloudModal(false);
+    if (cloudEndpoint.trim()) {
+      pullFromCloud(false);
+    } else {
+      showToast(`Kode Toko / Workspace diatur ke: ${cleanWs}`);
+    }
+  };
+
+  // Export & Import JSON Backup for manual transfer between devices or onboarding a new cafe
+  const handleExportBackupJson = () => {
+    const payload = {
+      workspaceId,
+      exportedAt: '2026-11-04',
+      branches,
+      ingredients,
+      branchStocks,
+      menus,
+      transactions,
+      stockLogs,
+      users,
+      licenses
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backup-${workspaceId.toLowerCase()}.json`;
+    a.click();
+    showToast(`File cadangan (${a.download}) berhasil diunduh!`);
+  };
+
+  const handleImportBackupJson = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const parsed = JSON.parse(evt.target.result);
+        applyWorkspaceSnapshot(parsed);
+        if (parsed.workspaceId) setWorkspaceId(parsed.workspaceId);
+        showToast('Data berhasil dipulihkan & disinkronkan dari file cadangan!');
+      } catch (err) {
+        showToast('Format file backup tidak valid!', 'error');
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const handleCopyPortalUrl = () => {
     const fullUrl = `${portalUrl}/login`;
@@ -979,6 +1246,144 @@ export default function App() {
       setReportBranchFilter(selectedBranchId);
     }
   }, [role, activeTab, selectedBranchId]);
+
+  // Check if current device has an active valid license
+  const activeDeviceLicenseObj = useMemo(() => {
+    if (!activatedLicenseCode) return null;
+    const found = licenses.find(
+      (l) => l.code.toUpperCase() === activatedLicenseCode.trim().toUpperCase()
+    );
+    if (!found || found.status !== 'active') return null;
+    if (
+      found.expiryDate &&
+      found.expiryDate !== 'SEUMUR HIDUP' &&
+      new Date(found.expiryDate) < new Date('2026-10-24')
+    ) {
+      return null;
+    }
+    return found;
+  }, [licenses, activatedLicenseCode]);
+
+  const generateRandomLicenseCode = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const seg1 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    const seg2 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    return `RJPOS-${seg1}-${seg2}`;
+  };
+
+  const handleActivateLicense = (e) => {
+    e.preventDefault();
+    const cleanCode = licenseInput.trim().toUpperCase();
+    const found = licenses.find((l) => l.code.toUpperCase() === cleanCode);
+    if (!found) {
+      setLicenseError('Kode Lisensi tidak terdaftar! Hubungi Admin Ramu Jaya POS.');
+      return;
+    }
+    if (found.status !== 'active') {
+      setLicenseError('Kode Lisensi ini sedang dinonaktifkan / diblokir oleh Admin!');
+      return;
+    }
+    if (
+      found.expiryDate &&
+      found.expiryDate !== 'SEUMUR HIDUP' &&
+      new Date(found.expiryDate) < new Date('2026-10-24')
+    ) {
+      setLicenseError(`Kode Lisensi telah habis masa aktifnya pada ${found.expiryDate}!`);
+      return;
+    }
+
+    setLicenseError('');
+    setActivatedLicenseCode(found.code);
+    setShowLicenseGate(false);
+    try {
+      localStorage.setItem('ramujaya_device_license_v1', found.code);
+    } catch (err) {
+      // ignore
+    }
+    showToast(`Perangkat berhasil diaktivasi dengan lisensi: ${found.holderName}`);
+  };
+
+  const handleDeactivateDeviceLicense = () => {
+    setActivatedLicenseCode('');
+    setLicenseInput('');
+    setCurrentUser(null);
+    setShowLicenseGate(true);
+    try {
+      localStorage.removeItem('ramujaya_device_license_v1');
+    } catch (err) {
+      // ignore
+    }
+    showToast('Lisensi perangkat dilepas. Silakan masukkan Kode Lisensi untuk memakai aplikasi.');
+  };
+
+  const handleCreateLicense = (e) => {
+    e.preventDefault();
+    const codeVal = (newLicenseForm.code.trim() || generateRandomLicenseCode()).toUpperCase();
+    if (!newLicenseForm.holderName.trim()) {
+      showToast('Nama pemegang / perangkat lisensi wajib diisi!', 'error');
+      return;
+    }
+    if (licenses.some((l) => l.code.toUpperCase() === codeVal)) {
+      showToast('Kode lisensi tersebut sudah ada!', 'error');
+      return;
+    }
+    const created = {
+      id: `lic-${Date.now()}`,
+      code: codeVal,
+      holderName: newLicenseForm.holderName.trim(),
+      branchId: newLicenseForm.branchId,
+      status: 'active',
+      expiryDate: newLicenseForm.expiryDate.trim() || 'SEUMUR HIDUP',
+      createdAt: '2026-10-28'
+    };
+    setLicenses([created, ...licenses]);
+    setNewLicenseModal(false);
+    setNewLicenseForm({
+      code: generateRandomLicenseCode(),
+      holderName: '',
+      branchId: 'ALL',
+      expiryDate: '2027-12-31'
+    });
+    showToast(`Kode Lisensi "${created.code}" berhasil dibuat!`);
+  };
+
+  const handleToggleLicenseStatus = (licId) => {
+    setLicenses(
+      licenses.map((l) => {
+        if (l.id !== licId) return l;
+        const nextStatus = l.status === 'active' ? 'suspended' : 'active';
+        return { ...l, status: nextStatus };
+      })
+    );
+    showToast('Status Kode Lisensi berhasil diperbarui!');
+  };
+
+  const handleDeleteLicense = (licId) => {
+    if (licenses.length <= 1) {
+      showToast('Minimal harus ada 1 kode lisensi utama di sistem!', 'error');
+      return;
+    }
+    setLicenses(licenses.filter((l) => l.id !== licId));
+    showToast('Kode Lisensi berhasil dihapus.');
+  };
+
+  const handleCopyLicenseCode = (codeStr) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(codeStr);
+      } else {
+        const el = document.createElement('textarea');
+        el.value = codeStr;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+      }
+    } catch (e) {
+      // ignore
+    }
+    showToast(`Kode Lisensi ${codeStr} disalin ke clipboard!`);
+  };
 
   const handleLoginSubmit = (e) => {
     e.preventDefault();
@@ -1664,17 +2069,32 @@ export default function App() {
     return (
       <div className="min-h-screen bg-stone-900 text-stone-100 flex items-center justify-center p-4 font-sans">
         <div className="max-w-md w-full bg-stone-800 rounded-3xl shadow-2xl border border-stone-700 overflow-hidden p-6 sm:p-8 space-y-6">
-          {/* Unified Single-Site Address Bar */}
-          <div className="bg-stone-900/90 border border-stone-700 rounded-2xl px-3.5 py-2 flex items-center justify-between gap-2">
+          {/* Unified Single-Site & Cloud Sync Status Bar */}
+          <div className="bg-stone-900/90 border border-stone-700 rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
-              <Globe className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span className="text-xs font-mono text-stone-300 truncate">
-                {portalUrl}/login
-              </span>
+              {cloudStatus === 'connected' ? (
+                <Cloud className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : (
+                <Database className="w-4 h-4 text-amber-400 shrink-0" />
+              )}
+              <div className="min-w-0">
+                <span className="text-[11px] font-bold text-stone-200 block truncate">
+                  ID Kafe / Workspace: <strong className="text-amber-300 font-mono">{workspaceId}</strong>
+                </span>
+                <span className="text-[10px] text-stone-400 block truncate">
+                  {cloudStatus === 'connected'
+                    ? `Cloud Realtime Aktif (Sync: ${lastSyncTime})`
+                    : 'Klik Sinkron Cloud agar HP Admin & Kasir Terhubung'}
+                </span>
+              </div>
             </div>
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shrink-0">
-              1 Pintu Semua Cabang
-            </span>
+            <button
+              type="button"
+              onClick={() => setCloudModal(true)}
+              className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold shrink-0 flex items-center gap-1 transition"
+            >
+              <Cloud className="w-3.5 h-3.5" /> Sinkron Cloud
+            </button>
           </div>
 
           {/* Brand Header */}
@@ -1689,6 +2109,83 @@ export default function App() {
               Portal Web Terpadu — Admin & Seluruh Karyawan Cabang Login di Alamat Ini
             </p>
           </div>
+
+          {/* Device License Status Bar on Login Screen */}
+          <div className="bg-stone-900/90 border border-stone-700 rounded-2xl p-3 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <ShieldCheck
+                className={`w-4 h-4 shrink-0 ${
+                  activeDeviceLicenseObj ? 'text-emerald-400' : 'text-amber-400'
+                }`}
+              />
+              <div className="min-w-0">
+                <p className="text-[11px] font-bold text-stone-200 truncate">
+                  {activeDeviceLicenseObj
+                    ? `Lisensi Aktif: ${activeDeviceLicenseObj.holderName}`
+                    : 'Mode Lisensi Perangkat Tersedia'}
+                </p>
+                <p className="text-[10px] text-stone-400 font-mono truncate">
+                  {activeDeviceLicenseObj
+                    ? `${activeDeviceLicenseObj.code} (s/d ${activeDeviceLicenseObj.expiryDate})`
+                    : 'Klik tombol di kanan untuk aktivasi / kunci dengan Kode Lisensi'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowLicenseGate(!showLicenseGate)}
+              className="px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[11px] font-bold shrink-0 transition"
+            >
+              {showLicenseGate
+                ? 'Ke Login Kasir'
+                : activeDeviceLicenseObj
+                ? 'Ganti Lisensi'
+                : 'Input Kode Lisensi'}
+            </button>
+          </div>
+
+          {showLicenseGate ? (
+            <div className="space-y-4 bg-stone-900/60 p-4 rounded-2xl border border-amber-500/30">
+              <div className="flex items-center gap-2">
+                <Lock className="w-4 h-4 text-amber-400" />
+                <h2 className="text-sm font-bold text-amber-300 uppercase tracking-wider">
+                  Aktivasi Kode Lisensi Aplikasi
+                </h2>
+              </div>
+              <p className="text-xs text-stone-400 leading-relaxed">
+                Setiap perangkat Android / Desktop pengguna wajib memasukkan <strong>Kode Lisensi Resmi</strong> yang diberikan oleh Owner / Admin Ramu Jaya POS.
+              </p>
+
+              {licenseError && (
+                <div className="p-3 rounded-xl bg-red-500/20 border border-red-500/40 text-red-200 text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+                  <span>{licenseError}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleActivateLicense} className="space-y-3">
+                <div>
+                  <label className="block text-xs font-bold text-stone-300 mb-1.5">
+                    Masukkan Kode Lisensi (Serial Key)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={licenseInput}
+                    onChange={(e) => setLicenseInput(e.target.value.toUpperCase())}
+                    placeholder="Contoh: RJPOS-SDA01-2026"
+                    className="w-full px-3.5 py-2.5 text-sm bg-stone-950 border border-stone-700 rounded-xl text-amber-300 placeholder-stone-600 font-mono font-bold tracking-wider uppercase focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg transition flex items-center justify-center gap-2"
+                >
+                  <CheckCircle2 className="w-4 h-4" /> Verifikasi & Aktifkan Perangkat Ini
+                </button>
+              </form>
+            </div>
+          ) : null}
 
           {/* Login Form */}
           <div>
@@ -1824,6 +2321,148 @@ export default function App() {
                   Mengerti
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================== MODAL CLOUD SYNC & MULTI-TENANT WORKSPACE ==================== */}
+        {cloudModal && (
+          <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 text-stone-800">
+            <div className="bg-white rounded-2xl max-w-lg w-full p-5 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
+                    <Cloud className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base text-stone-900">
+                      Sinkronisasi Cloud Antar-HP & Multi-Cafe (SaaS)
+                    </h3>
+                    <p className="text-xs text-stone-500">
+                      Hubungkan HP Admin & HP Kasir secara real-time atau pisahkan database antar-kafe
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCloudModal(false)}
+                  className="text-stone-400 hover:text-stone-600"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
+                {/* 1. Workspace / Tenant ID */}
+                <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 space-y-1.5">
+                  <label className="block font-extrabold text-amber-900">
+                    1. Kode Workspace / ID Kafe (Pemisah Database Antar-Klien)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={workspaceId}
+                    onChange={(e) => setWorkspaceId(e.target.value.toUpperCase())}
+                    placeholder="Contoh: RAMUJAYA-PUSAT atau KOPI-SENJA-01"
+                    className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl font-mono font-extrabold text-stone-900 uppercase"
+                  />
+                  <p className="text-[11px] text-amber-800 leading-relaxed">
+                    • <strong>Untuk Internal Kafe Anda:</strong> Masukkan Kode Workspace yang <strong>SAMA</strong> di HP Admin dan semua HP Kasir cabang Anda.<br />
+                    • <strong>Jika Ada Kafe / Orang Lain Ikut Memakai Aplikasi Ini:</strong> Berikan Kode Workspace yang <strong>BERBEDA</strong> untuk setiap pemilik kafe baru (misal: <code>KAFE-BINTANG</code>) agar menu, stok, cabang, dan laporan keuangan mereka terpisah 100% dari kafe Anda!
+                  </p>
+                </div>
+
+                {/* 2. Cloud Realtime Database URL */}
+                <div className="space-y-2">
+                  <label className="block font-bold text-stone-800">
+                    2. URL Cloud Database Realtime (Agar HP Admin & HP Kasir Sinkron Otomatis)
+                  </label>
+                  <input
+                    type="url"
+                    value={cloudEndpoint}
+                    onChange={(e) => setCloudEndpoint(e.target.value)}
+                    placeholder="Contoh: https://namaproject-default-rtdb.asia-southeast1.firebasedatabase.app"
+                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono text-xs text-stone-800"
+                  />
+                  <p className="text-[11px] text-stone-500 leading-relaxed">
+                    Cukup buat <strong>Firebase Realtime Database</strong> gratis (di <em>console.firebase.google.com</em> → Build → Realtime Database → Start in Test Mode), lalu tempel URL-nya di sini. Semua transaksi di HP Kasir akan otomatis muncul di HP Admin setiap 6 detik!
+                  </p>
+                </div>
+
+                {/* Optional Secret / Auth Token */}
+                <div>
+                  <label className="block font-bold text-stone-700 mb-1">
+                    Token Rahasia / API Key Cloud (Opsional)
+                  </label>
+                  <input
+                    type="password"
+                    value={cloudSecret}
+                    onChange={(e) => setCloudSecret(e.target.value)}
+                    placeholder="Kosongkan jika menggunakan Firebase mode publik/test"
+                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
+                  />
+                </div>
+
+                {/* Manual Export / Import Backup */}
+                <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="font-bold text-stone-800">Cadangkan / Pindah Data Manual (JSON)</p>
+                    <p className="text-[11px] text-stone-500">
+                      Ekspor atau impor seluruh data toko via file tanpa internet
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleExportBackupJson}
+                      className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-300 hover:bg-stone-100 text-stone-700 font-bold text-[11px]"
+                    >
+                      Ekspor File
+                    </button>
+                    <label className="px-2.5 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-900 text-white font-bold text-[11px] cursor-pointer">
+                      Impor File
+                      <input
+                        type="file"
+                        accept=".json"
+                        onChange={handleImportBackupJson}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-stone-100">
+                  {cloudEndpoint.trim() ? (
+                    <button
+                      type="button"
+                      onClick={() => pullFromCloud(false)}
+                      className="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> Tarik Data Sekarang
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-stone-400">
+                      Status: Penyimpanan Lokal ({workspaceId})
+                    </span>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setCloudModal(false)}
+                      className="px-4 py-2 rounded-xl bg-stone-100 text-stone-700 font-bold"
+                    >
+                      Tutup
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold"
+                    >
+                      Simpan & Sinkronkan
+                    </button>
+                  </div>
+                </div>
+              </form>
             </div>
           </div>
         )}
@@ -2100,6 +2739,26 @@ export default function App() {
 
               <button
                 type="button"
+                onClick={() => setCloudModal(true)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
+                  cloudStatus === 'connected'
+                    ? 'bg-emerald-600/25 border border-emerald-500/40 text-emerald-300'
+                    : 'bg-stone-800/80 hover:bg-stone-800 text-amber-300 border border-stone-700'
+                }`}
+                title="Sinkronisasi Antar HP & Multi-Cafe Cloud"
+              >
+                <Cloud className="w-4 h-4 shrink-0 text-emerald-400" />
+                {!sidebarCollapsed && (
+                  <span className="truncate">
+                    {cloudStatus === 'connected'
+                      ? `Cloud Aktif (${workspaceId})`
+                      : `Sinkron Cloud (${workspaceId})`}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
                 onClick={handleInstallClick}
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-emerald-300 bg-emerald-600/15 hover:bg-emerald-600/25 border border-emerald-500/30 transition"
                 title="Install Aplikasi Tanpa Ikon Chrome"
@@ -2184,6 +2843,21 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCloudModal(true)}
+                className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition ${
+                  cloudStatus === 'connected'
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                    : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
+                }`}
+                title="Pengaturan Sinkronisasi Cloud Antar HP & ID Kafe"
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">
+                  {cloudStatus === 'connected' ? `Sync: ${workspaceId}` : `Cloud (${workspaceId})`}
+                </span>
+              </button>
               <button
                 type="button"
                 onClick={() => setPrinterModal(true)}
@@ -2815,6 +3489,135 @@ export default function App() {
                           </tr>
                         );
                       })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Manajemen Kode Lisensi Pengguna (Serial Key APK Android / Desktop) */}
+            <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden mt-6">
+              <div className="p-5 border-b border-stone-100 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-base text-stone-800">
+                      Generator & Manajemen Kode Lisensi Aplikasi (Serial Key)
+                    </h3>
+                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      Proteksi APK & Web
+                    </span>
+                  </div>
+                  <p className="text-xs text-stone-500 mt-0.5">
+                    Buat dan bagikan Kode Lisensi unik untuk setiap orang/perangkat yang memakai aplikasi Android Anda. Anda dapat mencabut/memblokir akses kapan saja.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDeactivateDeviceLicense}
+                    className="px-3 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold flex items-center gap-1.5 transition"
+                    title="Uji Tampilan Kunci Lisensi di Perangkat Ini"
+                  >
+                    <Lock className="w-3.5 h-3.5" /> Uji Kunci Lisensi
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewLicenseForm({
+                        code: generateRandomLicenseCode(),
+                        holderName: '',
+                        branchId: 'ALL',
+                        expiryDate: '2027-12-31'
+                      });
+                      setNewLicenseModal(true);
+                    }}
+                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
+                  >
+                    <KeyRound className="w-4 h-4" /> + Buat Kode Lisensi Baru
+                  </button>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-stone-100/80 text-stone-600 uppercase text-[11px] font-bold border-b border-stone-200">
+                      <th className="py-3 px-4">Kode Lisensi (Serial Key)</th>
+                      <th className="py-3 px-4">Nama Pemegang / Perangkat</th>
+                      <th className="py-3 px-4">Cakupan Cabang</th>
+                      <th className="py-3 px-4">Masa Berlaku</th>
+                      <th className="py-3 px-4">Status Lisensi</th>
+                      <th className="py-3 px-4 text-right">Aksi Admin</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {licenses.map((lic) => {
+                      const isActive = lic.status === 'active';
+                      const bName =
+                        lic.branchId === 'ALL'
+                          ? 'Semua Cabang'
+                          : branches.find((b) => b.id === lic.branchId)?.name || lic.branchId;
+                      return (
+                        <tr key={lic.id} className="hover:bg-stone-50">
+                          <td className="py-3 px-4">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-extrabold text-stone-900 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                                {lic.code}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleCopyLicenseCode(lic.code)}
+                                className="p-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600"
+                                title="Salin Kode Lisensi"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 font-bold text-stone-800">
+                            {lic.holderName}
+                            <p className="text-[10px] text-stone-400 font-normal">
+                              Dibuat: {lic.createdAt}
+                            </p>
+                          </td>
+                          <td className="py-3 px-4 font-medium text-stone-700">{bName}</td>
+                          <td className="py-3 px-4 font-mono text-stone-700">{lic.expiryDate}</td>
+                          <td className="py-3 px-4">
+                            {isActive ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                <CheckCircle2 className="w-3 h-3" /> Aktif Diizinkan
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-red-50 text-red-600 border border-red-200">
+                                <Lock className="w-3 h-3" /> Diblokir / Nonaktif
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleToggleLicenseStatus(lic.id)}
+                                className={`px-2.5 py-1 rounded-lg font-bold text-[11px] border transition ${
+                                  isActive
+                                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
+                                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
+                                }`}
+                              >
+                                {isActive ? 'Blokir' : 'Aktifkan'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteLicense(lic.id)}
+                                className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 font-semibold text-[11px]"
+                              >
+                                Hapus
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -5073,6 +5876,282 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ==================== MODAL 13: BUAT KODE LISENSI BARU ==================== */}
+      {newLicenseModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleCreateLicense}
+            className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-stone-200 space-y-4"
+          >
+            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-50 text-amber-600">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-stone-900">
+                    Buat Kode Lisensi Pengguna Baru
+                  </h3>
+                  <p className="text-xs text-stone-500">
+                    Berikan kode ini kepada pengguna aplikasi Android / Desktop
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNewLicenseModal(false)}
+                className="text-stone-400 hover:text-stone-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-stone-700 mb-1">
+                  Kode Lisensi (Otomatis atau Ketik Sendiri)
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    required
+                    value={newLicenseForm.code}
+                    onChange={(e) =>
+                      setNewLicenseForm({
+                        ...newLicenseForm,
+                        code: e.target.value.toUpperCase()
+                      })
+                    }
+                    className="flex-1 px-3 py-2 bg-amber-50/70 border border-amber-300 rounded-xl font-mono font-extrabold text-amber-900 uppercase"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setNewLicenseForm({
+                        ...newLicenseForm,
+                        code: generateRandomLicenseCode()
+                      })
+                    }
+                    className="px-3 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold flex items-center gap-1"
+                    title="Acak Kode Baru"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Acak
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-stone-700 mb-1">
+                  Nama Pemegang / Perangkat Pengguna
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newLicenseForm.holderName}
+                  onChange={(e) =>
+                    setNewLicenseForm({ ...newLicenseForm, holderName: e.target.value })
+                  }
+                  placeholder="Contoh: Tablet Kasir Cabang Probolinggo / Mitra A"
+                  className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-stone-700 mb-1">Cakupan Cabang</label>
+                  <select
+                    value={newLicenseForm.branchId}
+                    onChange={(e) =>
+                      setNewLicenseForm({ ...newLicenseForm, branchId: e.target.value })
+                    }
+                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-semibold"
+                  >
+                    <option value="ALL">Semua Cabang</option>
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-stone-700 mb-1">
+                    Masa Berlaku (YYYY-MM-DD)
+                  </label>
+                  <input
+                    type="text"
+                    value={newLicenseForm.expiryDate}
+                    onChange={(e) =>
+                      setNewLicenseForm({ ...newLicenseForm, expiryDate: e.target.value })
+                    }
+                    placeholder="2027-12-31 atau SEUMUR HIDUP"
+                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-stone-100">
+              <button
+                type="button"
+                onClick={() => setNewLicenseModal(false)}
+                className="px-4 py-2 rounded-xl bg-stone-100 text-stone-700 text-xs font-bold"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold"
+              >
+                Simpan Kode Lisensi
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+        {/* ==================== MODAL CLOUD SYNC & MULTI-TENANT WORKSPACE ==================== */}
+        {cloudModal && (
+          <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 text-stone-800">
+            <div className="bg-white rounded-2xl max-w-lg w-full p-5 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
+                    <Cloud className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base text-stone-900">
+                      Sinkronisasi Cloud Antar-HP & Multi-Cafe (SaaS)
+                    </h3>
+                    <p className="text-xs text-stone-500">
+                      Hubungkan HP Admin & HP Kasir secara real-time atau pisahkan database antar-kafe
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCloudModal(false)}
+                  className="text-stone-400 hover:text-stone-600"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
+                {/* 1. Workspace / Tenant ID */}
+                <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 space-y-1.5">
+                  <label className="block font-extrabold text-amber-900">
+                    1. Kode Workspace / ID Kafe (Pemisah Database Antar-Klien)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={workspaceId}
+                    onChange={(e) => setWorkspaceId(e.target.value.toUpperCase())}
+                    placeholder="Contoh: RAMUJAYA-PUSAT atau KOPI-SENJA-01"
+                    className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl font-mono font-extrabold text-stone-900 uppercase"
+                  />
+                  <p className="text-[11px] text-amber-800 leading-relaxed">
+                    • <strong>Untuk Internal Kafe Anda:</strong> Masukkan Kode Workspace yang <strong>SAMA</strong> di HP Admin dan semua HP Kasir cabang Anda.<br />
+                    • <strong>Jika Ada Kafe / Orang Lain Ikut Memakai Aplikasi Ini:</strong> Berikan Kode Workspace yang <strong>BERBEDA</strong> untuk setiap pemilik kafe baru (misal: <code>KAFE-BINTANG</code>) agar menu, stok, cabang, dan laporan keuangan mereka terpisah 100% dari kafe Anda!
+                  </p>
+                </div>
+
+                {/* 2. Cloud Realtime Database URL */}
+                <div className="space-y-2">
+                  <label className="block font-bold text-stone-800">
+                    2. URL Cloud Database Realtime (Agar HP Admin & HP Kasir Sinkron Otomatis)
+                  </label>
+                  <input
+                    type="url"
+                    value={cloudEndpoint}
+                    onChange={(e) => setCloudEndpoint(e.target.value)}
+                    placeholder="Contoh: https://namaproject-default-rtdb.asia-southeast1.firebasedatabase.app"
+                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono text-xs text-stone-800"
+                  />
+                  <p className="text-[11px] text-stone-500 leading-relaxed">
+                    Cukup buat <strong>Firebase Realtime Database</strong> gratis (di <em>console.firebase.google.com</em> → Build → Realtime Database → Start in Test Mode), lalu tempel URL-nya di sini. Semua transaksi di HP Kasir akan otomatis muncul di HP Admin setiap 6 detik!
+                  </p>
+                </div>
+
+                {/* Optional Secret / Auth Token */}
+                <div>
+                  <label className="block font-bold text-stone-700 mb-1">
+                    Token Rahasia / API Key Cloud (Opsional)
+                  </label>
+                  <input
+                    type="password"
+                    value={cloudSecret}
+                    onChange={(e) => setCloudSecret(e.target.value)}
+                    placeholder="Kosongkan jika menggunakan Firebase mode publik/test"
+                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
+                  />
+                </div>
+
+                {/* Manual Export / Import Backup */}
+                <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="font-bold text-stone-800">Cadangkan / Pindah Data Manual (JSON)</p>
+                    <p className="text-[11px] text-stone-500">
+                      Ekspor atau impor seluruh data toko via file tanpa internet
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleExportBackupJson}
+                      className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-300 hover:bg-stone-100 text-stone-700 font-bold text-[11px]"
+                    >
+                      Ekspor File
+                    </button>
+                    <label className="px-2.5 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-900 text-white font-bold text-[11px] cursor-pointer">
+                      Impor File
+                      <input
+                        type="file"
+                        accept=".json"
+                        onChange={handleImportBackupJson}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-stone-100">
+                  {cloudEndpoint.trim() ? (
+                    <button
+                      type="button"
+                      onClick={() => pullFromCloud(false)}
+                      className="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> Tarik Data Sekarang
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-stone-400">
+                      Status: Penyimpanan Lokal ({workspaceId})
+                    </span>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setCloudModal(false)}
+                      className="px-4 py-2 rounded-xl bg-stone-100 text-stone-700 font-bold"
+                    >
+                      Tutup
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold"
+                    >
+                      Simpan & Sinkronkan
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
     </div>
   );
 }
