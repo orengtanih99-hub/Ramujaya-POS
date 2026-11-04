@@ -417,6 +417,8 @@ export default function App() {
   const [cloudStatus, setCloudStatus] = useState('local'); // 'local' | 'syncing' | 'connected' | 'error'
   const [lastSyncTime, setLastSyncTime] = useState('-');
   const [cloudModal, setCloudModal] = useState(false);
+  const [showAdvancedCloud, setShowAdvancedCloud] = useState(false);
+  const [magicSyncText, setMagicSyncText] = useState('');
   const [isApplyingRemote, setIsApplyingRemote] = useState(false);
 
   // --- LICENSE & DEVICE ACTIVATION STATE ---
@@ -1039,11 +1041,36 @@ export default function App() {
     return () => window.removeEventListener('storage', handleStorageEvent);
   }, [workspaceId]);
 
-  // Build clean URL for Cloud Database (Supports Firebase Realtime DB, JSONBin, or Custom REST API)
+  // Auto-read ?toko=KODE_TOKO from URL when cashier/client clicks a shared WhatsApp link
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const tokoParam = params.get('toko');
+      const dbParam = params.get('db');
+      if (tokoParam) {
+        const cleanToko = tokoParam.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+        if (cleanToko) {
+          setWorkspaceId(cleanToko);
+          const nextCfg = {
+            workspaceId: cleanToko,
+            cloudEndpoint: dbParam ? decodeURIComponent(dbParam) : cloudEndpoint,
+            cloudSecret
+          };
+          if (dbParam) setCloudEndpoint( decodeURIComponent(dbParam) );
+          localStorage.setItem('ramujaya_cloud_config_v1', JSON.stringify(nextCfg));
+        }
+      }
+    } catch (e) {}
+  }, []);
+
+  // Build clean URL for Cloud Database (Uses Custom Firebase URL if provided, or Built-In Zero-Config Cloud Relay automatically!)
   const getCloudWorkspaceUrl = () => {
+    const cleanWs = workspaceId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'RAMUJAYA-PUSAT';
     const base = cloudEndpoint.trim().replace(/\/+$/, '');
-    if (!base) return '';
-    const cleanWs = workspaceId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'DEFAULT';
+    if (!base) {
+      // Built-in Zero-Config Cloud Storage Relay keyed by unique Workspace ID
+      return `https://kvdb.io/RamuJayaPosCloudV1_${cleanWs}/state`;
+    }
     if (base.includes('firebaseio.com') || base.includes('firebasedatabase.app')) {
       const authParam = cloudSecret.trim() ? `?auth=${encodeURIComponent(cloudSecret.trim())}` : '';
       return `${base}/ramujaya_workspaces/${cleanWs}.json${authParam}`;
@@ -1135,20 +1162,14 @@ export default function App() {
     } catch (err) {
       // Ignore storage errors
     }
-    if (cloudEndpoint.trim()) {
-      const timer = setTimeout(() => {
-        pushToCloud(payload, true);
-      }, 600);
-      return () => clearTimeout(timer);
-    }
+    const timer = setTimeout(() => {
+      pushToCloud(payload, true);
+    }, 700);
+    return () => clearTimeout(timer);
   }, [branches, ingredients, branchStocks, menus, transactions, stockLogs, users, licenses, workspaceId]);
 
-  // Periodic background polling every 6 seconds when Cloud Endpoint is configured so Admin HP sees Cashier HP transactions live
+  // Periodic background polling every 6 seconds automatically using Workspace ID so Admin HP sees Cashier HP transactions live
   useEffect(() => {
-    if (!cloudEndpoint.trim()) {
-      setCloudStatus('local');
-      return;
-    }
     pullFromCloud(true);
     const interval = setInterval(() => {
       pullFromCloud(true);
@@ -1171,10 +1192,78 @@ export default function App() {
       );
     } catch (err) {}
     setCloudModal(false);
-    if (cloudEndpoint.trim()) {
-      pullFromCloud(false);
-    } else {
-      showToast(`Kode Toko / Workspace diatur ke: ${cleanWs}`);
+    pullFromCloud(false);
+    showToast(`Terhubung ke Kode Toko: ${cleanWs}! Semua HP dengan kode ini otomatis sinkron.`);
+  };
+
+  // Share 1-Click Invite Link for Cashier HP or New Cafe Owner
+  const handleCopyInviteLink = () => {
+    const cleanWs = workspaceId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'RAMUJAYA-PUSAT';
+    const baseHref = window.location.origin + window.location.pathname;
+    const dbQuery = cloudEndpoint.trim() ? `&db=${encodeURIComponent(cloudEndpoint.trim())}` : '';
+    const fullInviteUrl = `${baseHref}?toko=${cleanWs}${dbQuery}`;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(fullInviteUrl);
+      } else {
+        const el = document.createElement('textarea');
+        el.value = fullInviteUrl;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+      }
+    } catch (e) {}
+    showToast(`Link Pintas Toko (${cleanWs}) disalin! Kirim ke WhatsApp HP Kasir.`);
+  };
+
+  // Generate compact Base64 Sync Code to paste via WhatsApp
+  const handleCopyWhatsAppSyncCode = () => {
+    try {
+      const payload = {
+        workspaceId,
+        branches,
+        ingredients,
+        branchStocks,
+        menus,
+        transactions,
+        stockLogs,
+        users,
+        licenses
+      };
+      const codeStr = 'RJSYNC:' + btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(codeStr);
+      } else {
+        const el = document.createElement('textarea');
+        el.value = codeStr;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+      }
+      showToast('Kode Data WhatsApp berhasil disalin! Tempel di HP lain untuk sinkron instan.');
+    } catch (err) {
+      showToast('Gagal membuat kode sinkron.', 'error');
+    }
+  };
+
+  const handleApplyWhatsAppSyncCode = () => {
+    if (!magicSyncText.trim()) {
+      showToast('Tempelkan kode RJSYNC terlebih dahulu!', 'error');
+      return;
+    }
+    try {
+      const raw = magicSyncText.trim().replace(/^RJSYNC:/, '');
+      const jsonStr = decodeURIComponent(escape(atob(raw)));
+      const parsed = JSON.parse(jsonStr);
+      applyWorkspaceSnapshot(parsed);
+      if (parsed.workspaceId) setWorkspaceId(parsed.workspaceId);
+      setMagicSyncText('');
+      setCloudModal(false);
+      showToast('Data berhasil disinkronkan dari Kode WhatsApp!');
+    } catch (err) {
+      showToast('Kode sinkron tidak valid atau tidak lengkap!', 'error');
     }
   };
 
@@ -2325,10 +2414,10 @@ export default function App() {
           </div>
         )}
 
-        {/* ==================== MODAL CLOUD SYNC & MULTI-TENANT WORKSPACE ==================== */}
+        {/* ==================== MODAL SINKRON MUDAH 1 KODE TOKO ==================== */}
         {cloudModal && (
           <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 text-stone-800">
-            <div className="bg-white rounded-2xl max-w-lg w-full p-5 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
               <div className="flex items-center justify-between border-b border-stone-100 pb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
@@ -2336,10 +2425,10 @@ export default function App() {
                   </div>
                   <div>
                     <h3 className="font-bold text-base text-stone-900">
-                      Sinkronisasi Cloud Antar-HP & Multi-Cafe (SaaS)
+                      Sinkron Antar-HP Super Mudah (1 Kode)
                     </h3>
                     <p className="text-xs text-stone-500">
-                      Hubungkan HP Admin & HP Kasir secara real-time atau pisahkan database antar-kafe
+                      Tanpa daftar akun rumit — cukup samakan Kode Toko!
                     </p>
                   </div>
                 </div>
@@ -2353,114 +2442,143 @@ export default function App() {
               </div>
 
               <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
-                {/* 1. Workspace / Tenant ID */}
-                <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 space-y-1.5">
-                  <label className="block font-extrabold text-amber-900">
-                    1. Kode Workspace / ID Kafe (Pemisah Database Antar-Klien)
-                  </label>
+                {/* LANGKAH TUNGGAL: KODE TOKO */}
+                <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-extrabold text-amber-950 text-sm">
+                      Ketik Kode Unik Kafe Anda:
+                    </label>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
+                      Otomatis Sinkron
+                    </span>
+                  </div>
+
                   <input
                     type="text"
                     required
                     value={workspaceId}
                     onChange={(e) => setWorkspaceId(e.target.value.toUpperCase())}
-                    placeholder="Contoh: RAMUJAYA-PUSAT atau KOPI-SENJA-01"
-                    className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl font-mono font-extrabold text-stone-900 uppercase"
+                    placeholder="Contoh: RAMUJAYA-01"
+                    className="w-full px-3.5 py-3 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-base text-stone-900 uppercase tracking-wider text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
                   />
-                  <p className="text-[11px] text-amber-800 leading-relaxed">
-                    • <strong>Untuk Internal Kafe Anda:</strong> Masukkan Kode Workspace yang <strong>SAMA</strong> di HP Admin dan semua HP Kasir cabang Anda.<br />
-                    • <strong>Jika Ada Kafe / Orang Lain Ikut Memakai Aplikasi Ini:</strong> Berikan Kode Workspace yang <strong>BERBEDA</strong> untuk setiap pemilik kafe baru (misal: <code>KAFE-BINTANG</code>) agar menu, stok, cabang, dan laporan keuangan mereka terpisah 100% dari kafe Anda!
-                  </p>
-                </div>
 
-                {/* 2. Cloud Realtime Database URL */}
-                <div className="space-y-2">
-                  <label className="block font-bold text-stone-800">
-                    2. URL Cloud Database Realtime (Agar HP Admin & HP Kasir Sinkron Otomatis)
-                  </label>
-                  <input
-                    type="url"
-                    value={cloudEndpoint}
-                    onChange={(e) => setCloudEndpoint(e.target.value)}
-                    placeholder="Contoh: https://namaproject-default-rtdb.asia-southeast1.firebasedatabase.app"
-                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono text-xs text-stone-800"
-                  />
-                  <p className="text-[11px] text-stone-500 leading-relaxed">
-                    Cukup buat <strong>Firebase Realtime Database</strong> gratis (di <em>console.firebase.google.com</em> → Build → Realtime Database → Start in Test Mode), lalu tempel URL-nya di sini. Semua transaksi di HP Kasir akan otomatis muncul di HP Admin setiap 6 detik!
-                  </p>
-                </div>
-
-                {/* Optional Secret / Auth Token */}
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">
-                    Token Rahasia / API Key Cloud (Opsional)
-                  </label>
-                  <input
-                    type="password"
-                    value={cloudSecret}
-                    onChange={(e) => setCloudSecret(e.target.value)}
-                    placeholder="Kosongkan jika menggunakan Firebase mode publik/test"
-                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
-                  />
-                </div>
-
-                {/* Manual Export / Import Backup */}
-                <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="font-bold text-stone-800">Cadangkan / Pindah Data Manual (JSON)</p>
-                    <p className="text-[11px] text-stone-500">
-                      Ekspor atau impor seluruh data toko via file tanpa internet
+                  <div className="bg-white/90 p-2.5 rounded-xl border border-amber-200 text-[11px] text-stone-700 space-y-1 leading-relaxed">
+                    <p>
+                      ✅ <strong>Cara Pakai untuk HP Admin & HP Kasir Anda:</strong><br />
+                      Cukup ketik Kode yang <strong>SAMA</strong> (misal: <code>RAMUJAYA-01</code>) di HP Admin dan di HP Kasir, lalu klik <strong>Hubungkan Sekarang</strong>.
+                    </p>
+                    <p>
+                      ✅ <strong>Cara Pakai Jika Ada Kafe / Orang Lain Mau Pakai:</strong><br />
+                      Suruh mereka mengetik Kode nama kafe mereka sendiri (misal: <code>KOPI-BINTANG</code>). Otomatis seluruh menu, stok, dan laporan mereka terpisah sendiri!
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
+
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="submit"
+                      className="flex-1 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-sm transition"
+                    >
+                      Hubungkan Sekarang
+                    </button>
                     <button
                       type="button"
-                      onClick={handleExportBackupJson}
-                      className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-300 hover:bg-stone-100 text-stone-700 font-bold text-[11px]"
+                      onClick={handleCopyInviteLink}
+                      className="px-3 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-xs flex items-center gap-1 transition"
+                      title="Salin Link Otomatis untuk dikirim ke WhatsApp Kasir"
                     >
-                      Ekspor File
+                      <Share2 className="w-3.5 h-3.5" /> Kirim Link WA
                     </button>
-                    <label className="px-2.5 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-900 text-white font-bold text-[11px] cursor-pointer">
-                      Impor File
-                      <input
-                        type="file"
-                        accept=".json"
-                        onChange={handleImportBackupJson}
-                        className="hidden"
-                      />
-                    </label>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between gap-2 pt-2 border-t border-stone-100">
-                  {cloudEndpoint.trim() ? (
+                {/* ALTERNATIF: SALIN & TEMPEL KODE DATA VIA WHATSAPP (100% PASTI BISA TANPA SERVER) */}
+                <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-bold text-stone-800">
+                        Sinkron Instan via Chat WhatsApp (Salin & Tempel)
+                      </p>
+                      <p className="text-[11px] text-stone-500">
+                        Kirim seluruh data menu, stok & transaksi ke HP lain lewat pesan WA:
+                      </p>
+                    </div>
                     <button
                       type="button"
-                      onClick={() => pullFromCloud(false)}
-                      className="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold flex items-center gap-1.5"
+                      onClick={handleCopyWhatsAppSyncCode}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 shrink-0"
                     >
-                      <RefreshCw className="w-3.5 h-3.5" /> Tarik Data Sekarang
-                    </button>
-                  ) : (
-                    <span className="text-[11px] text-stone-400">
-                      Status: Penyimpanan Lokal ({workspaceId})
-                    </span>
-                  )}
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setCloudModal(false)}
-                      className="px-4 py-2 rounded-xl bg-stone-100 text-stone-700 font-bold"
-                    >
-                      Tutup
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold"
-                    >
-                      Simpan & Sinkronkan
+                      <Copy className="w-3.5 h-3.5" /> 1. Salin Data HP Ini
                     </button>
                   </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={magicSyncText}
+                      onChange={(e) => setMagicSyncText(e.target.value)}
+                      placeholder="2. Tempel kode RJSYNC:... dari WA di sini"
+                      className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-xl font-mono text-[11px]"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleApplyWhatsAppSyncCode}
+                      className="px-3 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-[11px] shrink-0"
+                    >
+                      Terapkan
+                    </button>
+                  </div>
+                </div>
+
+                {/* OPSI LANJUTAN (DISEMBUNYIKAN AGAR TIDAK MEMBINGUNGKAN) */}
+                <div className="pt-1 border-t border-stone-100">
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedCloud(!showAdvancedCloud)}
+                    className="text-[11px] text-stone-400 hover:text-stone-600 font-semibold flex items-center gap-1"
+                  >
+                    <Settings className="w-3 h-3" />
+                    {showAdvancedCloud
+                      ? 'Sembunyikan Pengaturan Server Pribadi'
+                      : 'Pengaturan Lanjutan (Opsional: Server Firebase / Backup File)'}
+                  </button>
+
+                  {showAdvancedCloud && (
+                    <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
+                      <div>
+                        <label className="block font-bold text-stone-700 mb-1">
+                          URL Server Firebase Pribadi (Kosongkan jika pakai Server Otomatis)
+                        </label>
+                        <input
+                          type="url"
+                          value={cloudEndpoint}
+                          onChange={(e) => setCloudEndpoint(e.target.value)}
+                          placeholder="Opsional: https://...firebasedatabase.app"
+                          className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-[11px]"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-[11px] text-stone-500">Backup File JSON:</span>
+                        <div className="flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={handleExportBackupJson}
+                            className="px-2.5 py-1 rounded bg-white border border-stone-300 text-stone-700 font-bold text-[11px]"
+                          >
+                            Download File
+                          </button>
+                          <label className="px-2.5 py-1 rounded bg-stone-800 text-white font-bold text-[11px] cursor-pointer">
+                            Upload File
+                            <input
+                              type="file"
+                              accept=".json"
+                              onChange={handleImportBackupJson}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </form>
             </div>
@@ -6011,10 +6129,10 @@ export default function App() {
         </div>
       )}
 
-        {/* ==================== MODAL CLOUD SYNC & MULTI-TENANT WORKSPACE ==================== */}
+        {/* ==================== MODAL SINKRON MUDAH 1 KODE TOKO ==================== */}
         {cloudModal && (
           <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 text-stone-800">
-            <div className="bg-white rounded-2xl max-w-lg w-full p-5 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
               <div className="flex items-center justify-between border-b border-stone-100 pb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
@@ -6022,10 +6140,10 @@ export default function App() {
                   </div>
                   <div>
                     <h3 className="font-bold text-base text-stone-900">
-                      Sinkronisasi Cloud Antar-HP & Multi-Cafe (SaaS)
+                      Sinkron Antar-HP Super Mudah (1 Kode)
                     </h3>
                     <p className="text-xs text-stone-500">
-                      Hubungkan HP Admin & HP Kasir secara real-time atau pisahkan database antar-kafe
+                      Tanpa daftar akun rumit — cukup samakan Kode Toko!
                     </p>
                   </div>
                 </div>
@@ -6039,114 +6157,143 @@ export default function App() {
               </div>
 
               <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
-                {/* 1. Workspace / Tenant ID */}
-                <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 space-y-1.5">
-                  <label className="block font-extrabold text-amber-900">
-                    1. Kode Workspace / ID Kafe (Pemisah Database Antar-Klien)
-                  </label>
+                {/* LANGKAH TUNGGAL: KODE TOKO */}
+                <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-extrabold text-amber-950 text-sm">
+                      Ketik Kode Unik Kafe Anda:
+                    </label>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
+                      Otomatis Sinkron
+                    </span>
+                  </div>
+
                   <input
                     type="text"
                     required
                     value={workspaceId}
                     onChange={(e) => setWorkspaceId(e.target.value.toUpperCase())}
-                    placeholder="Contoh: RAMUJAYA-PUSAT atau KOPI-SENJA-01"
-                    className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl font-mono font-extrabold text-stone-900 uppercase"
+                    placeholder="Contoh: RAMUJAYA-01"
+                    className="w-full px-3.5 py-3 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-base text-stone-900 uppercase tracking-wider text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
                   />
-                  <p className="text-[11px] text-amber-800 leading-relaxed">
-                    • <strong>Untuk Internal Kafe Anda:</strong> Masukkan Kode Workspace yang <strong>SAMA</strong> di HP Admin dan semua HP Kasir cabang Anda.<br />
-                    • <strong>Jika Ada Kafe / Orang Lain Ikut Memakai Aplikasi Ini:</strong> Berikan Kode Workspace yang <strong>BERBEDA</strong> untuk setiap pemilik kafe baru (misal: <code>KAFE-BINTANG</code>) agar menu, stok, cabang, dan laporan keuangan mereka terpisah 100% dari kafe Anda!
-                  </p>
-                </div>
 
-                {/* 2. Cloud Realtime Database URL */}
-                <div className="space-y-2">
-                  <label className="block font-bold text-stone-800">
-                    2. URL Cloud Database Realtime (Agar HP Admin & HP Kasir Sinkron Otomatis)
-                  </label>
-                  <input
-                    type="url"
-                    value={cloudEndpoint}
-                    onChange={(e) => setCloudEndpoint(e.target.value)}
-                    placeholder="Contoh: https://namaproject-default-rtdb.asia-southeast1.firebasedatabase.app"
-                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono text-xs text-stone-800"
-                  />
-                  <p className="text-[11px] text-stone-500 leading-relaxed">
-                    Cukup buat <strong>Firebase Realtime Database</strong> gratis (di <em>console.firebase.google.com</em> → Build → Realtime Database → Start in Test Mode), lalu tempel URL-nya di sini. Semua transaksi di HP Kasir akan otomatis muncul di HP Admin setiap 6 detik!
-                  </p>
-                </div>
-
-                {/* Optional Secret / Auth Token */}
-                <div>
-                  <label className="block font-bold text-stone-700 mb-1">
-                    Token Rahasia / API Key Cloud (Opsional)
-                  </label>
-                  <input
-                    type="password"
-                    value={cloudSecret}
-                    onChange={(e) => setCloudSecret(e.target.value)}
-                    placeholder="Kosongkan jika menggunakan Firebase mode publik/test"
-                    className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
-                  />
-                </div>
-
-                {/* Manual Export / Import Backup */}
-                <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="font-bold text-stone-800">Cadangkan / Pindah Data Manual (JSON)</p>
-                    <p className="text-[11px] text-stone-500">
-                      Ekspor atau impor seluruh data toko via file tanpa internet
+                  <div className="bg-white/90 p-2.5 rounded-xl border border-amber-200 text-[11px] text-stone-700 space-y-1 leading-relaxed">
+                    <p>
+                      ✅ <strong>Cara Pakai untuk HP Admin & HP Kasir Anda:</strong><br />
+                      Cukup ketik Kode yang <strong>SAMA</strong> (misal: <code>RAMUJAYA-01</code>) di HP Admin dan di HP Kasir, lalu klik <strong>Hubungkan Sekarang</strong>.
+                    </p>
+                    <p>
+                      ✅ <strong>Cara Pakai Jika Ada Kafe / Orang Lain Mau Pakai:</strong><br />
+                      Suruh mereka mengetik Kode nama kafe mereka sendiri (misal: <code>KOPI-BINTANG</code>). Otomatis seluruh menu, stok, dan laporan mereka terpisah sendiri!
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
+
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="submit"
+                      className="flex-1 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-sm transition"
+                    >
+                      Hubungkan Sekarang
+                    </button>
                     <button
                       type="button"
-                      onClick={handleExportBackupJson}
-                      className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-300 hover:bg-stone-100 text-stone-700 font-bold text-[11px]"
+                      onClick={handleCopyInviteLink}
+                      className="px-3 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-xs flex items-center gap-1 transition"
+                      title="Salin Link Otomatis untuk dikirim ke WhatsApp Kasir"
                     >
-                      Ekspor File
+                      <Share2 className="w-3.5 h-3.5" /> Kirim Link WA
                     </button>
-                    <label className="px-2.5 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-900 text-white font-bold text-[11px] cursor-pointer">
-                      Impor File
-                      <input
-                        type="file"
-                        accept=".json"
-                        onChange={handleImportBackupJson}
-                        className="hidden"
-                      />
-                    </label>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between gap-2 pt-2 border-t border-stone-100">
-                  {cloudEndpoint.trim() ? (
+                {/* ALTERNATIF: SALIN & TEMPEL KODE DATA VIA WHATSAPP (100% PASTI BISA TANPA SERVER) */}
+                <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-bold text-stone-800">
+                        Sinkron Instan via Chat WhatsApp (Salin & Tempel)
+                      </p>
+                      <p className="text-[11px] text-stone-500">
+                        Kirim seluruh data menu, stok & transaksi ke HP lain lewat pesan WA:
+                      </p>
+                    </div>
                     <button
                       type="button"
-                      onClick={() => pullFromCloud(false)}
-                      className="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold flex items-center gap-1.5"
+                      onClick={handleCopyWhatsAppSyncCode}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 shrink-0"
                     >
-                      <RefreshCw className="w-3.5 h-3.5" /> Tarik Data Sekarang
-                    </button>
-                  ) : (
-                    <span className="text-[11px] text-stone-400">
-                      Status: Penyimpanan Lokal ({workspaceId})
-                    </span>
-                  )}
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setCloudModal(false)}
-                      className="px-4 py-2 rounded-xl bg-stone-100 text-stone-700 font-bold"
-                    >
-                      Tutup
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold"
-                    >
-                      Simpan & Sinkronkan
+                      <Copy className="w-3.5 h-3.5" /> 1. Salin Data HP Ini
                     </button>
                   </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={magicSyncText}
+                      onChange={(e) => setMagicSyncText(e.target.value)}
+                      placeholder="2. Tempel kode RJSYNC:... dari WA di sini"
+                      className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-xl font-mono text-[11px]"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleApplyWhatsAppSyncCode}
+                      className="px-3 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-[11px] shrink-0"
+                    >
+                      Terapkan
+                    </button>
+                  </div>
+                </div>
+
+                {/* OPSI LANJUTAN (DISEMBUNYIKAN AGAR TIDAK MEMBINGUNGKAN) */}
+                <div className="pt-1 border-t border-stone-100">
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedCloud(!showAdvancedCloud)}
+                    className="text-[11px] text-stone-400 hover:text-stone-600 font-semibold flex items-center gap-1"
+                  >
+                    <Settings className="w-3 h-3" />
+                    {showAdvancedCloud
+                      ? 'Sembunyikan Pengaturan Server Pribadi'
+                      : 'Pengaturan Lanjutan (Opsional: Server Firebase / Backup File)'}
+                  </button>
+
+                  {showAdvancedCloud && (
+                    <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
+                      <div>
+                        <label className="block font-bold text-stone-700 mb-1">
+                          URL Server Firebase Pribadi (Kosongkan jika pakai Server Otomatis)
+                        </label>
+                        <input
+                          type="url"
+                          value={cloudEndpoint}
+                          onChange={(e) => setCloudEndpoint(e.target.value)}
+                          placeholder="Opsional: https://...firebasedatabase.app"
+                          className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-[11px]"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-[11px] text-stone-500">Backup File JSON:</span>
+                        <div className="flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={handleExportBackupJson}
+                            className="px-2.5 py-1 rounded bg-white border border-stone-300 text-stone-700 font-bold text-[11px]"
+                          >
+                            Download File
+                          </button>
+                          <label className="px-2.5 py-1 rounded bg-stone-800 text-white font-bold text-[11px] cursor-pointer">
+                            Upload File
+                            <input
+                              type="file"
+                              accept=".json"
+                              onChange={handleImportBackupJson}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </form>
             </div>
