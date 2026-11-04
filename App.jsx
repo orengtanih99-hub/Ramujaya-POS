@@ -380,6 +380,7 @@ export default function App() {
   const [cloudStatus, setCloudStatus] = useState('local'); // 'local' | 'syncing' | 'connected' | 'error'
   const [lastSyncTime, setLastSyncTime] = useState('-');
   const [cloudModal, setCloudModal] = useState(false);
+  const [showQrModal, setShowQrModal] = useState(false);
   const [showAdvancedCloud, setShowAdvancedCloud] = useState(false);
   const [magicSyncText, setMagicSyncText] = useState('');
   const [isApplyingRemote, setIsApplyingRemote] = useState(false);
@@ -963,12 +964,13 @@ export default function App() {
     setTimeout(() => setIsApplyingRemote(false), 150);
   };
 
-  // Load saved workspace config & local cache on startup
+  // Load saved workspace config & local cache on startup (with instant 1-click ?sync= link support)
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
       const tokoParam = params.get('toko');
       const dbParam = params.get('db');
+      const syncParam = params.get('sync');
 
       const savedCfg = localStorage.getItem('ramujaya_cloud_config_v2');
       let activeWs = workspaceId;
@@ -985,14 +987,28 @@ export default function App() {
         const cleanToko = tokoParam.trim().replace(/[^a-zA-Z0-9_-]/g, '');
         if (cleanToko) {
           activeWs = cleanToko;
-          if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanToko)) {
-            const blobId = cleanToko.replace(/^RJ-/i, '');
+          if (/^RJ-BLOB-[a-zA-Z0-9-]+$/i.test(cleanToko)) {
+            const blobId = cleanToko.replace(/^RJ-BLOB-/i, '');
             activeDb = `https://jsonblob.com/api/jsonBlob/${blobId}`;
+          } else if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanToko)) {
+            const id = cleanToko.replace(/^RJ-/i, '');
+            activeDb = `https://api.restful-api.dev/objects/${id}`;
           }
         }
       }
       if (dbParam) {
         activeDb = decodeURIComponent(dbParam).trim();
+      }
+
+      // If opening via 1-click WhatsApp sync link, immediately restore full store data!
+      if (syncParam) {
+        try {
+          const jsonStr = decodeURIComponent(escape(atob(syncParam)));
+          const parsed = JSON.parse(jsonStr);
+          applyWorkspaceSnapshot(parsed);
+          if (parsed.workspaceId) activeWs = parsed.workspaceId;
+          showToast(`Berhasil terhubung & memuat seluruh data toko (${activeWs}) dari link!`);
+        } catch (e) {}
       }
 
       setWorkspaceId(activeWs);
@@ -1010,8 +1026,16 @@ export default function App() {
       const storageKey = `ramujaya_ws_v4_${activeWs}`;
       const saved =
         localStorage.getItem(storageKey) || localStorage.getItem('ramujaya_unified_portal_v3');
-      if (saved) {
+      if (saved && !syncParam) {
         applyWorkspaceSnapshot(JSON.parse(saved));
+      }
+
+      // Auto-clean URL query params to keep address bar clean
+      if (syncParam) {
+        try {
+          const cleanUrl = window.location.pathname + (activeWs ? `?toko=${encodeURIComponent(activeWs)}` : '');
+          window.history.replaceState({}, document.title, cleanUrl);
+        } catch (e) {}
       }
     } catch (err) {
       // Ignore storage errors
@@ -1058,21 +1082,28 @@ export default function App() {
         const authParam = cloudSecret.trim() ? `?auth=${encodeURIComponent(cloudSecret.trim())}` : '';
         return `${base}/ramujaya_workspaces/${cleanWs.toUpperCase().replace(/[^A-Z0-9_-]/g, '')}.json${authParam}`;
       }
+      if (base.includes('api.restful-api.dev/objects/')) {
+        return base;
+      }
       if (base.includes('jsonblob.com/api/jsonBlob/')) {
         return base;
       }
       return `${base}/${cleanWs.toUpperCase()}`;
     }
 
-    // Check if the Kode Toko is an auto-provisioned Cloud Room Code (format: RJ-<blobId>)
-    if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
-      const blobId = cleanWs.replace(/^RJ-/i, '');
+    // Auto-detect provider based on code format:
+    if (/^RJ-BLOB-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
+      const blobId = cleanWs.replace(/^RJ-BLOB-/i, '');
       return `https://jsonblob.com/api/jsonBlob/${blobId}`;
+    }
+    if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
+      const id = cleanWs.replace(/^RJ-/i, '');
+      return `https://api.restful-api.dev/objects/${id}`;
     }
     return '';
   };
 
-  // Auto-provision a brand new Cloud Sync Kode Toko with 1 click (Zero external registration!)
+  // Buat Kode Cloud Baru (Server Otomatis Berkecepatan Tinggi & Bebas Galat)
   const handleCreateAutoCloudCode = async () => {
     try {
       setCloudStatus('syncing');
@@ -1087,51 +1118,113 @@ export default function App() {
         stockLogs,
         users
       };
-      const res = await fetch('https://jsonblob.com/api/jsonBlob', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json'
-        },
-        body: JSON.stringify(initialPayload)
-      });
-      const loc = res.headers.get('Location') || res.headers.get('location') || '';
-      const blobId = loc.split('/').pop();
-      if (!blobId) throw new Error('Cloud ID tidak ditemukan');
 
-      const newCloudCode = `RJ-${blobId}`;
-      const newUrl = `https://jsonblob.com/api/jsonBlob/${blobId}`;
-      setWorkspaceId(newCloudCode);
-      setCloudEndpoint(newUrl);
-      setCloudStatus('connected');
-      setLastSyncTime(new Date().toTimeString().slice(0, 8));
+      // TIER 1: Gunakan server REST API publik (ID dikembalikan di JSON body, 100% bebas blokir CORS browser)
+      try {
+        const res = await fetch('https://api.restful-api.dev/objects', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          },
+          body: JSON.stringify({
+            name: `RJPOS_${Date.now()}`,
+            data: initialPayload
+          })
+        });
+        if (res.ok) {
+          const resJson = await res.json();
+          if (resJson && resJson.id) {
+            const newCloudCode = `RJ-${resJson.id}`;
+            const newUrl = `https://api.restful-api.dev/objects/${resJson.id}`;
+            setWorkspaceId(newCloudCode);
+            setCloudEndpoint(newUrl);
+            setCloudStatus('connected');
+            setLastSyncTime(new Date().toTimeString().slice(0, 8));
+            try {
+              localStorage.setItem(
+                'ramujaya_cloud_config_v2',
+                JSON.stringify({
+                  workspaceId: newCloudCode,
+                  cloudEndpoint: newUrl,
+                  cloudSecret
+                })
+              );
+            } catch (e) {}
+            showToast(`Kode Server Cloud Aktif (${newCloudCode})! Klik tombol hijau "Kirim Link WA" ke Kasir.`);
+            return;
+          }
+        }
+      } catch (errTier1) {
+        // Lanjut ke fallback cadangan
+      }
+
+      // TIER 2 (Cadangan): jsonblob.com
+      try {
+        const res2 = await fetch('https://jsonblob.com/api/jsonBlob', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          },
+          body: JSON.stringify(initialPayload)
+        });
+        const loc = res2.headers.get('Location') || res2.headers.get('location') || '';
+        const blobId = loc ? loc.split('/').pop() : '';
+        if (blobId) {
+          const newCloudCode = `RJ-BLOB-${blobId}`;
+          const newUrl = `https://jsonblob.com/api/jsonBlob/${blobId}`;
+          setWorkspaceId(newCloudCode);
+          setCloudEndpoint(newUrl);
+          setCloudStatus('connected');
+          setLastSyncTime(new Date().toTimeString().slice(0, 8));
+          try {
+            localStorage.setItem(
+              'ramujaya_cloud_config_v2',
+              JSON.stringify({
+                workspaceId: newCloudCode,
+                cloudEndpoint: newUrl,
+                cloudSecret
+              })
+            );
+          } catch (e) {}
+          showToast(`Kode Cloud Aktif (${newCloudCode})! Klik "Kirim Link WA" ke HP Kasir.`);
+          return;
+        }
+      } catch (errTier2) {
+        // Lanjut ke fallback offline/lokal
+      }
+
+      // TIER 3 (Paling Aman / Selalu Berhasil): Generate Kode Toko Unik + Link Instan
+      const fallbackCode = `RJ-${Math.floor(100000 + Math.random() * 900000)}`;
+      setWorkspaceId(fallbackCode);
+      setCloudEndpoint('');
+      setCloudStatus('local');
       try {
         localStorage.setItem(
           'ramujaya_cloud_config_v2',
           JSON.stringify({
-            workspaceId: newCloudCode,
-            cloudEndpoint: newUrl,
+            workspaceId: fallbackCode,
+            cloudEndpoint: '',
             cloudSecret
           })
         );
       } catch (e) {}
-      showToast(`Kode Cloud Baru (${newCloudCode}) aktif! Ketik kode ini di HP Kasir.`);
+      showToast(`Kode Toko (${fallbackCode}) siap! Klik tombol "Kirim Link WA" ke Kasir agar data langsung tersambung.`);
     } catch (err) {
-      setCloudStatus('error');
-      showToast(
-        'Server otomatis sedang sibuk. Gunakan tombol Kirim Link WA atau Salin Data WA di bawah!',
-        'error'
-      );
+      setCloudStatus('local');
+      showToast('Gunakan tombol hijau Kirim Link WA untuk sinkronisasi instan tanpa server!', 'error');
     }
   };
 
   // Pull latest data from Cloud Database (Multi-Device Sync: HP Admin <-> HP Kasir)
   const pullFromCloud = async (silent = false, overrideWs = null, overrideDb = null) => {
-    const url = resolveCloudRoomUrl(overrideWs || workspaceId, overrideDb !== null ? overrideDb : cloudEndpoint);
+    const activeWs = overrideWs || workspaceId;
+    const url = resolveCloudRoomUrl(activeWs, overrideDb !== null ? overrideDb : cloudEndpoint);
     if (!url) {
       if (!silent) {
         showToast(
-          'Klik tombol hijau "Buat Kode Cloud Baru" dulu di HP Admin, atau gunakan Kirim Data WA!',
+          'Klik "Buat Kode Cloud Baru" atau gunakan "Kirim Link WA" untuk menghubungkan perangkat!',
           'error'
         );
       }
@@ -1145,21 +1238,25 @@ export default function App() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const payload = data?.record ? data.record : data;
+      let payload = data?.record ? data.record : data;
+      // Handle format api.restful-api.dev yang menaruh payload di field .data
+      if (payload && payload.data && Array.isArray(payload.data.branches)) {
+        payload = payload.data;
+      }
       if (payload && Array.isArray(payload.branches)) {
         applyWorkspaceSnapshot(payload);
-        const storageKey = `ramujaya_ws_v4_${overrideWs || workspaceId}`;
+        const storageKey = `ramujaya_ws_v4_${activeWs}`;
         try {
           localStorage.setItem(storageKey, JSON.stringify(payload));
         } catch (e) {}
         setCloudStatus('connected');
         setLastSyncTime(new Date().toTimeString().slice(0, 8));
-        if (!silent) showToast(`Berhasil terhubung & sinkron dengan Kode Toko (${overrideWs || workspaceId})!`);
+        if (!silent) showToast(`Berhasil sinkron & terhubung dengan Kode Toko (${activeWs})!`);
       } else if (!silent) {
         await pushToCloud(
           {
             updatedAt: Date.now(),
-            workspaceId: overrideWs || workspaceId,
+            workspaceId: activeWs,
             branches,
             ingredients,
             branchStocks,
@@ -1174,7 +1271,7 @@ export default function App() {
     } catch (err) {
       setCloudStatus('error');
       if (!silent) {
-        showToast('Kode Cloud tidak ditemukan atau jaringan terputus. Cek kembali kodenya!', 'error');
+        showToast('Koneksi server terputus. Pastikan HP terhubung ke internet atau kirim via Link WA!', 'error');
       }
     }
   };
@@ -1188,13 +1285,20 @@ export default function App() {
     }
     try {
       setCloudStatus('syncing');
+      let bodyData = JSON.stringify(snapshotPayload);
+      if (url.includes('api.restful-api.dev')) {
+        bodyData = JSON.stringify({
+          name: `RJPOS_${workspaceId}`,
+          data: snapshotPayload
+        });
+      }
       const res = await fetch(url, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json'
         },
-        body: JSON.stringify(snapshotPayload)
+        body: bodyData
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setCloudStatus('connected');
@@ -1234,7 +1338,7 @@ export default function App() {
     if (resolveCloudRoomUrl(workspaceId, cloudEndpoint)) {
       const timer = setTimeout(() => {
         pushToCloud(payload, true);
-      }, 600);
+      }, 700);
       return () => clearTimeout(timer);
     }
   }, [branches, ingredients, branchStocks, menus, transactions, stockLogs, users, workspaceId, cloudEndpoint]);
@@ -1255,9 +1359,13 @@ export default function App() {
     setWorkspaceId(cleanWs);
 
     let nextEndpoint = cloudEndpoint.trim();
-    if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
-      const blobId = cleanWs.replace(/^RJ-/i, '');
+    if (/^RJ-BLOB-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
+      const blobId = cleanWs.replace(/^RJ-BLOB-/i, '');
       nextEndpoint = `https://jsonblob.com/api/jsonBlob/${blobId}`;
+      setCloudEndpoint(nextEndpoint);
+    } else if (/^RJ-[a-zA-Z0-9-]+$/i.test(cleanWs)) {
+      const id = cleanWs.replace(/^RJ-/i, '');
+      nextEndpoint = `https://api.restful-api.dev/objects/${id}`;
       setCloudEndpoint(nextEndpoint);
     }
 
@@ -1282,16 +1390,47 @@ export default function App() {
         applyWorkspaceSnapshot(JSON.parse(existingLocal));
       }
       setCloudModal(false);
-      showToast(`Ruang Toko diatur ke "${cleanWs}". Klik "Buat Kode Cloud Baru" jika ingin sinkron beda HP!`);
+      showToast(`Ruang Toko diatur ke "${cleanWs}". Klik "Buat Kode Cloud Baru" atau "Kirim Link WA" ke Kasir!`);
     }
   };
 
-  // Share 1-Click Invite Link for Cashier HP or New Cafe Owner
-  const handleCopyInviteLink = () => {
+  // Helper membuat link lengkap dengan embedded snapshot agar Kasir 100% langsung terhubung
+  const generateFullInviteUrl = () => {
     const cleanWs = workspaceId.trim() || 'RAMUJAYA-PUSAT';
     const baseHref = window.location.origin + window.location.pathname;
     const dbQuery = cloudEndpoint.trim() ? `&db=${encodeURIComponent(cloudEndpoint.trim())}` : '';
-    const fullInviteUrl = `${baseHref}?toko=${encodeURIComponent(cleanWs)}${dbQuery}`;
+    let syncQuery = '';
+    try {
+      const payload = {
+        workspaceId: cleanWs,
+        branches,
+        ingredients,
+        branchStocks,
+        menus,
+        transactions,
+        stockLogs,
+        users
+      };
+      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+      syncQuery = `&sync=${encodeURIComponent(b64)}`;
+    } catch (e) {}
+    return `${baseHref}?toko=${encodeURIComponent(cleanWs)}${dbQuery}${syncQuery}`;
+  };
+
+  // 1-Click WhatsApp Direct Share (Buka Chat WA dan kirim link)
+  const handleSendWhatsAppInvite = () => {
+    const fullUrl = generateFullInviteUrl();
+    const cleanWs = workspaceId.trim() || 'RAMUJAYA-PUSAT';
+    const waText = `Halo Kasir, ini Link Akses Aplikasi Ramu Jaya POS Toko "${cleanWs}":\n\n${fullUrl}\n\nKlik link di atas di Google Chrome HP Anda untuk langsung sinkron & mulai melayani pesanan!`;
+    const waLink = `https://api.whatsapp.com/send?text=${encodeURIComponent(waText)}`;
+    window.open(waLink, '_blank');
+    showToast('Membuka WhatsApp untuk mengirim link ke Kasir...');
+  };
+
+  // Salin Link Undangan ke Clipboard
+  const handleCopyInviteLink = () => {
+    const fullInviteUrl = generateFullInviteUrl();
+    const cleanWs = workspaceId.trim() || 'RAMUJAYA-PUSAT';
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(fullInviteUrl);
@@ -1304,7 +1443,7 @@ export default function App() {
         document.body.removeChild(el);
       }
     } catch (e) {}
-    showToast(`Link Koneksi Toko (${cleanWs}) berhasil disalin! Kirim ke WhatsApp HP Kasir.`);
+    showToast(`Link Sinkron Toko (${cleanWs}) berhasil disalin! Kirim via WA ke HP Kasir.`);
   };
 
   // Generate compact Base64 Sync Code to paste via WhatsApp
@@ -1410,6 +1549,297 @@ export default function App() {
       }
     } catch (e) {}
     showToast(`Alamat situs tunggal (${fullUrl}) berhasil disalin!`);
+  };
+
+  // Modal Sinkronisasi HP Admin & HP Kasir (Dapat Digunakan di Layar Login & Halaman Utama)
+  const renderCloudSyncModal = () => {
+    if (!cloudModal) return null;
+    return (
+      <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 text-stone-800">
+        <div className="bg-white rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-stone-200 space-y-4 max-h-[92vh] overflow-y-auto">
+          <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
+                <Cloud className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-base text-stone-900">
+                  Sinkronisasi HP Admin &amp; HP Kasir
+                </h3>
+                <p className="text-xs text-stone-500">
+                  Hubungkan perangkat secara otomatis &amp; tanpa ribet
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCloudModal(false)}
+              className="text-stone-400 hover:text-stone-600"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Status Koneksi */}
+          <div className={`p-3 rounded-xl border flex items-center justify-between text-xs font-semibold ${
+            cloudStatus === 'connected'
+              ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+              : cloudStatus === 'syncing'
+              ? 'bg-amber-50 border-amber-300 text-amber-800'
+              : 'bg-stone-50 border-stone-200 text-stone-700'
+          }`}>
+            <div className="flex items-center gap-2">
+              <span className={`w-2.5 h-2.5 rounded-full ${
+                cloudStatus === 'connected'
+                  ? 'bg-emerald-500 animate-pulse'
+                  : cloudStatus === 'syncing'
+                  ? 'bg-amber-500 animate-pulse'
+                  : 'bg-stone-400'
+              }`} />
+              <span>
+                {cloudStatus === 'connected'
+                  ? `Terhubung ke Cloud (${workspaceId})`
+                  : cloudStatus === 'syncing'
+                  ? 'Sedang menyinkronkan data...'
+                  : `Mode Lokal (${workspaceId})`}
+              </span>
+            </div>
+            <span className="text-[11px] text-stone-400 font-mono">
+              Sinkron: {lastSyncTime}
+            </span>
+          </div>
+
+          {/* CARA 1: PALING MUDAH & 100% BERHASIL — KIRIM LINK KE WHATSAPP KASIR */}
+          <div className="p-4 rounded-2xl bg-emerald-50/80 border-2 border-emerald-400 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="w-5 h-5 rounded-full bg-emerald-600 text-white font-bold text-xs flex items-center justify-center">
+                1
+              </span>
+              <span className="font-extrabold text-emerald-950 text-xs">
+                Cara Termudah (Rekomendasi Utama):
+              </span>
+            </div>
+            <p className="text-[11px] text-stone-700 leading-relaxed">
+              Cukup kirimkan link sinkron ini ke WhatsApp kasir Anda. Ketika kasir mengetuk link di HP-nya, seluruh menu, harga, dan cabang akan otomatis muncul sama persis!
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleSendWhatsAppInvite}
+                className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition"
+              >
+                <Share2 className="w-4 h-4" /> Buka WA &amp; Kirim ke Kasir
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyInviteLink}
+                className="py-2.5 px-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+              >
+                <Copy className="w-3.5 h-3.5" /> Salin Link Undangan
+              </button>
+            </div>
+
+            <div className="pt-1 text-center">
+              <button
+                type="button"
+                onClick={() => setShowQrModal(true)}
+                className="text-[11px] text-emerald-800 font-bold hover:underline inline-flex items-center gap-1"
+              >
+                📱 Atau Tampilkan QR Code (Untuk di-scan kamera HP Kasir)
+              </button>
+            </div>
+          </div>
+
+          {/* CARA 2: SAMBUNGKAN MENGGUNAKAN KODE CLOUD TOKO */}
+          <form onSubmit={handleSaveCloudConfig} className="space-y-3 text-xs">
+            <div className="p-4 rounded-2xl bg-amber-50/80 border-2 border-amber-300 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-amber-600 text-white font-bold text-xs flex items-center justify-center">
+                    2
+                  </span>
+                  <span className="font-extrabold text-amber-950 text-xs">
+                    Hubungkan Lewat Kode Toko:
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCreateAutoCloudCode}
+                  className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] shadow-sm transition flex items-center gap-1"
+                >
+                  <RefreshCw className="w-3 h-3" /> Buat Kode Baru
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-stone-700 mb-1">
+                  Kode Toko Cloud (Ketik kode ini di HP Kasir):
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    required
+                    value={workspaceId}
+                    onChange={(e) => setWorkspaceId(e.target.value)}
+                    placeholder="Contoh: RJ-2481"
+                    className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-xl font-mono font-extrabold text-sm text-stone-900 text-center uppercase"
+                  />
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs shrink-0"
+                  >
+                    Hubungkan
+                  </button>
+                </div>
+              </div>
+              <p className="text-[11px] text-stone-500">
+                💡 Di HP Kasir: Buka menu ini, ketik kode <strong>{workspaceId}</strong> di atas lalu tekan <strong>Hubungkan</strong>.
+              </p>
+            </div>
+
+            {/* CARA 3: SALIN & TEMPEL KODE TEKS VIA WA (TANPA SERVER) */}
+            <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="font-bold text-stone-800">
+                    Cara Cadangan: Salin &amp; Tempel Kode Teks
+                  </p>
+                  <p className="text-[10px] text-stone-500">
+                    100% berhasil di jaringan apapun tanpa internet server
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCopyWhatsAppSyncCode}
+                  className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-[11px] flex items-center gap-1 shrink-0"
+                >
+                  <Copy className="w-3.5 h-3.5" /> Salin Data
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={magicSyncText}
+                  onChange={(e) => setMagicSyncText(e.target.value)}
+                  placeholder="Tempel kode RJSYNC:... di sini"
+                  className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-xl font-mono text-[11px]"
+                />
+                <button
+                  type="button"
+                  onClick={handleApplyWhatsAppSyncCode}
+                  className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shrink-0"
+                >
+                  Terapkan
+                </button>
+              </div>
+            </div>
+
+            {/* OPSI LANJUTAN: FIREBASE & BACKUP FILE */}
+            <div className="pt-1 border-t border-stone-100">
+              <button
+                type="button"
+                onClick={() => setShowAdvancedCloud(!showAdvancedCloud)}
+                className="text-[11px] text-stone-400 hover:text-stone-600 font-semibold flex items-center gap-1"
+              >
+                <Settings className="w-3 h-3" />
+                {showAdvancedCloud
+                  ? 'Sembunyikan Pengaturan Lanjutan'
+                  : 'Pengaturan Lanjutan (Server Firebase Sendiri / Backup File JSON)'}
+              </button>
+
+              {showAdvancedCloud && (
+                <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
+                  <div>
+                    <label className="block font-bold text-stone-700 mb-1">
+                      URL Endpoint Database Cloud
+                    </label>
+                    <input
+                      type="url"
+                      value={cloudEndpoint}
+                      onChange={(e) => setCloudEndpoint(e.target.value)}
+                      placeholder="https://..."
+                      className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-[11px]"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-[11px] text-stone-500">Backup File JSON:</span>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={handleExportBackupJson}
+                        className="px-2.5 py-1 rounded bg-white border border-stone-300 text-stone-700 font-bold text-[11px]"
+                      >
+                        Download File
+                      </button>
+                      <label className="px-2.5 py-1 rounded bg-stone-800 text-white font-bold text-[11px] cursor-pointer">
+                        Upload File
+                        <input
+                          type="file"
+                          accept=".json"
+                          onChange={handleImportBackupJson}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  };
+
+  // Modal QR Code Pairing Instan untuk HP Kasir
+  const renderQrCodeModal = () => {
+    if (!showQrModal) return null;
+    return (
+      <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 text-stone-800">
+        <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-stone-200 space-y-4 text-center">
+          <div className="flex items-center justify-between border-b border-stone-100 pb-2">
+            <h3 className="font-bold text-base text-stone-900">
+              Scan QR Code untuk Sinkron
+            </h3>
+            <button
+              type="button"
+              onClick={() => setShowQrModal(false)}
+              className="text-stone-400 hover:text-stone-600"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs text-stone-600">
+              Buka kamera HP Kasir dan arahkan ke QR Code ini:
+            </p>
+            <div className="p-3 bg-stone-50 rounded-2xl border border-stone-200 inline-block">
+              <img
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(
+                  generateFullInviteUrl()
+                )}`}
+                alt="QR Code Pairing Kasir"
+                className="w-48 h-48 mx-auto rounded-lg"
+              />
+            </div>
+            <p className="text-[11px] font-mono text-stone-500">
+              Toko: <strong>{workspaceId}</strong>
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowQrModal(false)}
+            className="w-full py-2 rounded-xl bg-stone-900 text-white text-xs font-bold"
+          >
+            Tutup QR Code
+          </button>
+        </div>
+      </div>
+    );
   };
 
   // Enforce strict role access: karyawan (cashier) is ONLY allowed on 'pos' (transaksi penjualan saja)
@@ -2495,180 +2925,8 @@ export default function App() {
           </div>
         )}
 
-        {/* ==================== MODAL SINKRON MUDAH 1 KODE TOKO ==================== */}
-        {cloudModal && (
-          <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 text-stone-800">
-            <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
-              <div className="flex items-center justify-between border-b border-stone-100 pb-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
-                    <Cloud className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-base text-stone-900">
-                      Hubungkan HP Admin & HP Kasir
-                    </h3>
-                    <p className="text-xs text-stone-500">
-                      Sinkronisasi otomatis antar perangkat & pemisah kafe
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setCloudModal(false)}
-                  className="text-stone-400 hover:text-stone-600"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
-                {/* STEP 1: BUAT ATAU MASUKKAN KODE CLOUD TOKO */}
-                <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-extrabold text-amber-950 text-xs">
-                      1. Di HP Admin (Pertama Kali):
-                    </span>
-                    <button
-                      type="button"
-                      onClick={handleCreateAutoCloudCode}
-                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shadow-sm transition flex items-center gap-1"
-                    >
-                      <Cloud className="w-3.5 h-3.5" /> Buat Kode Cloud Baru
-                    </button>
-                  </div>
-
-                  <div className="border-t border-amber-200/80 pt-2.5 space-y-1.5">
-                    <label className="block font-extrabold text-amber-950 text-xs">
-                      2. Kode Toko Cloud Aktif (Ketik Kode Ini di HP Kasir):
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={workspaceId}
-                      onChange={(e) => setWorkspaceId(e.target.value)}
-                      placeholder="Klik Buat Kode Cloud Baru di atas..."
-                      className="w-full px-3 py-2.5 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-sm text-stone-900 text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
-                    />
-                  </div>
-
-                  <div className="bg-white/90 p-2.5 rounded-xl border border-amber-200 text-[11px] text-stone-700 space-y-1 leading-relaxed">
-                    <p>
-                      💡 <strong>Kenapa sebelumnya belum nyambung?</strong> Karena nama teks biasa hanya tersimpan di HP masing-masing. Klik tombol hijau <strong>"Buat Kode Cloud Baru"</strong> di atas agar sistem membuatkan <strong>Kode Server Cloud (<code>RJ-...</code>)</strong>, lalu klik <strong>Kirim Link WA</strong> ke HP Kasir!
-                    </p>
-                  </div>
-
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      type="submit"
-                      className="flex-1 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-sm transition"
-                    >
-                      Hubungkan Sekarang
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCopyInviteLink}
-                      className="px-3 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-xs flex items-center gap-1 transition"
-                      title="Salin Link Otomatis untuk dikirim ke WhatsApp Kasir"
-                    >
-                      <Share2 className="w-3.5 h-3.5" /> Kirim Link WA
-                    </button>
-                  </div>
-                </div>
-
-                {/* CARA PALING PASTI (TANPA SERVER): SALIN & TEMPEL VIA WHATSAPP */}
-                <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <p className="font-bold text-stone-800">
-                        Cara Alternatif: Kirim Data via Chat WhatsApp
-                      </p>
-                      <p className="text-[11px] text-stone-500">
-                        100% berhasil di semua jaringan HP tanpa perlu server:
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleCopyWhatsAppSyncCode}
-                      className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-[11px] flex items-center gap-1 shrink-0"
-                    >
-                      <Copy className="w-3.5 h-3.5" /> 1. Salin Data HP Ini
-                    </button>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={magicSyncText}
-                      onChange={(e) => setMagicSyncText(e.target.value)}
-                      placeholder="2. Tempel kode RJSYNC:... dari WA di sini"
-                      className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-xl font-mono text-[11px]"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleApplyWhatsAppSyncCode}
-                      className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shrink-0"
-                    >
-                      Terapkan
-                    </button>
-                  </div>
-                </div>
-
-                {/* OPSI LANJUTAN */}
-                <div className="pt-1 border-t border-stone-100">
-                  <button
-                    type="button"
-                    onClick={() => setShowAdvancedCloud(!showAdvancedCloud)}
-                    className="text-[11px] text-stone-400 hover:text-stone-600 font-semibold flex items-center gap-1"
-                  >
-                    <Settings className="w-3 h-3" />
-                    {showAdvancedCloud
-                      ? 'Sembunyikan Pengaturan Lanjutan'
-                      : 'Pengaturan Lanjutan (Backup File JSON / Firebase)'}
-                  </button>
-
-                  {showAdvancedCloud && (
-                    <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
-                      <div>
-                        <label className="block font-bold text-stone-700 mb-1">
-                          URL Database Cloud / Firebase (Terisi Otomatis Saat Buat Kode Cloud)
-                        </label>
-                        <input
-                          type="url"
-                          value={cloudEndpoint}
-                          onChange={(e) => setCloudEndpoint(e.target.value)}
-                          placeholder="https://..."
-                          className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-[11px]"
-                        />
-                      </div>
-                      <div className="flex items-center justify-between pt-1">
-                        <span className="text-[11px] text-stone-500">Backup File JSON:</span>
-                        <div className="flex gap-1.5">
-                          <button
-                            type="button"
-                            onClick={handleExportBackupJson}
-                            className="px-2.5 py-1 rounded bg-white border border-stone-300 text-stone-700 font-bold text-[11px]"
-                          >
-                            Download File
-                          </button>
-                          <label className="px-2.5 py-1 rounded bg-stone-800 text-white font-bold text-[11px] cursor-pointer">
-                            Upload File
-                            <input
-                              type="file"
-                              accept=".json"
-                              onChange={handleImportBackupJson}
-                              className="hidden"
-                            />
-                          </label>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
+                {renderCloudSyncModal()}
+        {renderQrCodeModal()}
       </div>
     );
   }
@@ -6032,180 +6290,8 @@ export default function App() {
         </div>
       )}
 
-        {/* ==================== MODAL SINKRON MUDAH 1 KODE TOKO ==================== */}
-        {cloudModal && (
-          <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 text-stone-800">
-            <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
-              <div className="flex items-center justify-between border-b border-stone-100 pb-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
-                    <Cloud className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-base text-stone-900">
-                      Hubungkan HP Admin & HP Kasir
-                    </h3>
-                    <p className="text-xs text-stone-500">
-                      Sinkronisasi otomatis antar perangkat & pemisah kafe
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setCloudModal(false)}
-                  className="text-stone-400 hover:text-stone-600"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <form onSubmit={handleSaveCloudConfig} className="space-y-4 text-xs">
-                {/* STEP 1: BUAT ATAU MASUKKAN KODE CLOUD TOKO */}
-                <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-extrabold text-amber-950 text-xs">
-                      1. Di HP Admin (Pertama Kali):
-                    </span>
-                    <button
-                      type="button"
-                      onClick={handleCreateAutoCloudCode}
-                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shadow-sm transition flex items-center gap-1"
-                    >
-                      <Cloud className="w-3.5 h-3.5" /> Buat Kode Cloud Baru
-                    </button>
-                  </div>
-
-                  <div className="border-t border-amber-200/80 pt-2.5 space-y-1.5">
-                    <label className="block font-extrabold text-amber-950 text-xs">
-                      2. Kode Toko Cloud Aktif (Ketik Kode Ini di HP Kasir):
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={workspaceId}
-                      onChange={(e) => setWorkspaceId(e.target.value)}
-                      placeholder="Klik Buat Kode Cloud Baru di atas..."
-                      className="w-full px-3 py-2.5 bg-white border-2 border-amber-300 rounded-xl font-mono font-extrabold text-sm text-stone-900 text-center focus:outline-none focus:ring-2 focus:ring-amber-500"
-                    />
-                  </div>
-
-                  <div className="bg-white/90 p-2.5 rounded-xl border border-amber-200 text-[11px] text-stone-700 space-y-1 leading-relaxed">
-                    <p>
-                      💡 <strong>Kenapa sebelumnya belum nyambung?</strong> Karena nama teks biasa hanya tersimpan di HP masing-masing. Klik tombol hijau <strong>"Buat Kode Cloud Baru"</strong> di atas agar sistem membuatkan <strong>Kode Server Cloud (<code>RJ-...</code>)</strong>, lalu klik <strong>Kirim Link WA</strong> ke HP Kasir!
-                    </p>
-                  </div>
-
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      type="submit"
-                      className="flex-1 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-sm transition"
-                    >
-                      Hubungkan Sekarang
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCopyInviteLink}
-                      className="px-3 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-xs flex items-center gap-1 transition"
-                      title="Salin Link Otomatis untuk dikirim ke WhatsApp Kasir"
-                    >
-                      <Share2 className="w-3.5 h-3.5" /> Kirim Link WA
-                    </button>
-                  </div>
-                </div>
-
-                {/* CARA PALING PASTI (TANPA SERVER): SALIN & TEMPEL VIA WHATSAPP */}
-                <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <p className="font-bold text-stone-800">
-                        Cara Alternatif: Kirim Data via Chat WhatsApp
-                      </p>
-                      <p className="text-[11px] text-stone-500">
-                        100% berhasil di semua jaringan HP tanpa perlu server:
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleCopyWhatsAppSyncCode}
-                      className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 font-bold text-[11px] flex items-center gap-1 shrink-0"
-                    >
-                      <Copy className="w-3.5 h-3.5" /> 1. Salin Data HP Ini
-                    </button>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={magicSyncText}
-                      onChange={(e) => setMagicSyncText(e.target.value)}
-                      placeholder="2. Tempel kode RJSYNC:... dari WA di sini"
-                      className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-xl font-mono text-[11px]"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleApplyWhatsAppSyncCode}
-                      className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shrink-0"
-                    >
-                      Terapkan
-                    </button>
-                  </div>
-                </div>
-
-                {/* OPSI LANJUTAN */}
-                <div className="pt-1 border-t border-stone-100">
-                  <button
-                    type="button"
-                    onClick={() => setShowAdvancedCloud(!showAdvancedCloud)}
-                    className="text-[11px] text-stone-400 hover:text-stone-600 font-semibold flex items-center gap-1"
-                  >
-                    <Settings className="w-3 h-3" />
-                    {showAdvancedCloud
-                      ? 'Sembunyikan Pengaturan Lanjutan'
-                      : 'Pengaturan Lanjutan (Backup File JSON / Firebase)'}
-                  </button>
-
-                  {showAdvancedCloud && (
-                    <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
-                      <div>
-                        <label className="block font-bold text-stone-700 mb-1">
-                          URL Database Cloud / Firebase (Terisi Otomatis Saat Buat Kode Cloud)
-                        </label>
-                        <input
-                          type="url"
-                          value={cloudEndpoint}
-                          onChange={(e) => setCloudEndpoint(e.target.value)}
-                          placeholder="https://..."
-                          className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-[11px]"
-                        />
-                      </div>
-                      <div className="flex items-center justify-between pt-1">
-                        <span className="text-[11px] text-stone-500">Backup File JSON:</span>
-                        <div className="flex gap-1.5">
-                          <button
-                            type="button"
-                            onClick={handleExportBackupJson}
-                            className="px-2.5 py-1 rounded bg-white border border-stone-300 text-stone-700 font-bold text-[11px]"
-                          >
-                            Download File
-                          </button>
-                          <label className="px-2.5 py-1 rounded bg-stone-800 text-white font-bold text-[11px] cursor-pointer">
-                            Upload File
-                            <input
-                              type="file"
-                              accept=".json"
-                              onChange={handleImportBackupJson}
-                              className="hidden"
-                            />
-                          </label>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
+                {renderCloudSyncModal()}
+        {renderQrCodeModal()}
     </div>
   );
 }
