@@ -484,37 +484,140 @@ const decompressSyncPayload = async (rawStr) => {
   return null;
 };
 
+// Helper to load the most recent saved state synchronously before first render
+const loadInitialWorkspaceState = () => {
+  let activeWs = 'RAMUJAYA-PUSAT';
+  let activeDb = '';
+  let activeSecret = '';
+  let deviceId = 'dev_' + Math.random().toString(36).slice(2, 10);
+
+  try {
+    const savedDevId = localStorage.getItem('ramujaya_device_id_v1');
+    if (savedDevId) {
+      deviceId = savedDevId;
+    } else {
+      localStorage.setItem('ramujaya_device_id_v1', deviceId);
+    }
+  } catch (e) {}
+
+  try {
+    const savedCfg = localStorage.getItem('ramujaya_cloud_config_v2');
+    if (savedCfg) {
+      const cfg = JSON.parse(savedCfg);
+      if (cfg.workspaceId) activeWs = cfg.workspaceId.trim().toUpperCase();
+      if (cfg.cloudEndpoint) activeDb = cfg.cloudEndpoint;
+      if (cfg.cloudSecret) activeSecret = cfg.cloudSecret;
+    }
+  } catch (e) {}
+
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const tokoParam = params.get('toko');
+    const dbParam = params.get('db');
+    const syncParam = params.get('sync');
+
+    if (tokoParam) {
+      const cleanToko = tokoParam.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+      if (cleanToko) activeWs = cleanToko;
+    }
+    if (dbParam) {
+      activeDb = decodeURIComponent(dbParam).trim();
+    }
+    if (syncParam) {
+      const jsonStr = decodeURIComponent(escape(atob(syncParam)));
+      const parsed = JSON.parse(jsonStr);
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.workspaceId) activeWs = String(parsed.workspaceId).trim().toUpperCase();
+        const nowTs = Math.max(Date.now(), Number(parsed.updatedAt) || 0);
+        const syncedSnap = { ...parsed, workspaceId: activeWs, updatedAt: nowTs };
+        try {
+          localStorage.setItem(`ramujaya_ws_v4_${activeWs}`, JSON.stringify(syncedSnap));
+          localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(syncedSnap));
+          localStorage.setItem(
+            'ramujaya_cloud_config_v2',
+            JSON.stringify({ workspaceId: activeWs, cloudEndpoint: activeDb, cloudSecret: activeSecret })
+          );
+        } catch (e) {}
+        return {
+          workspaceId: activeWs,
+          cloudEndpoint: activeDb,
+          cloudSecret: activeSecret,
+          deviceId,
+          snapshot: syncedSnap,
+          fromSyncLink: true
+        };
+      }
+    }
+  } catch (e) {}
+
+  // Inspect all candidate localStorage keys and pick the most recently updated snapshot
+  let bestSnapshot = null;
+  let bestTs = -1;
+  try {
+    const candidateKeys = [
+      `ramujaya_ws_v4_${activeWs}`,
+      'ramujaya_unified_portal_v3',
+      'ramujaya_ws_v4_RAMUJAYA-PUSAT'
+    ];
+    for (const key of candidateKeys) {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          const ts = Number(parsed.updatedAt) || 1;
+          if (ts > bestTs) {
+            bestTs = ts;
+            bestSnapshot = parsed;
+          }
+        }
+      }
+    }
+  } catch (e) {}
+
+  return {
+    workspaceId: activeWs,
+    cloudEndpoint: activeDb,
+    cloudSecret: activeSecret,
+    deviceId,
+    snapshot: bestSnapshot,
+    fromSyncLink: false
+  };
+};
+
 export default function App() {
+  // Load initial state synchronously on Frame #1 so deleted/edited data NEVER reverts on refresh!
+  const initData = useMemo(() => loadInitialWorkspaceState(), []);
+  const initSnap = initData.snapshot;
+
   // --- MULTI-TENANT WORKSPACE & REAL-TIME CLOUD SYNC STATE ---
-  const [workspaceId, setWorkspaceId] = useState('RAMUJAYA-PUSAT');
-  const [draftWorkspaceId, setDraftWorkspaceId] = useState('RAMUJAYA-PUSAT');
-  const [cloudEndpoint, setCloudEndpoint] = useState('');
-  const [cloudSecret, setCloudSecret] = useState('');
+  const [workspaceId, setWorkspaceId] = useState(() => initData.workspaceId);
+  const [draftWorkspaceId, setDraftWorkspaceId] = useState(() => initData.workspaceId);
+  const [cloudEndpoint, setCloudEndpoint] = useState(() => initData.cloudEndpoint);
+  const [cloudSecret, setCloudSecret] = useState(() => initData.cloudSecret);
   const [cloudStatus, setCloudStatus] = useState('connected'); // 'local' | 'syncing' | 'connected' | 'error'
   const [lastSyncTime, setLastSyncTime] = useState(() => new Date().toTimeString().slice(0, 8));
   const [cloudModal, setCloudModal] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
   const [showAdvancedCloud, setShowAdvancedCloud] = useState(false);
   const [magicSyncText, setMagicSyncText] = useState('');
-  const [lastResetAt, setLastResetAt] = useState(0);
+  const [lastResetAt, setLastResetAt] = useState(() => Number(initSnap?.lastResetAt) || 0);
   const [localMutationTick, setLocalMutationTick] = useState(0);
 
   // Refs for zero-flicker, echo-free real-time WebSocket synchronization
-  const deviceIdRef = useRef('dev_' + Math.random().toString(36).slice(2, 10));
+  const deviceIdRef = useRef(initData.deviceId);
   const mqttWsRef = useRef(null);
   const mqttConnectedRef = useRef(false);
   const ntfyWsRef = useRef(null);
-  const lastAppliedTimestampRef = useRef(0);
-  const lastResetAtRef = useRef(0);
+  const lastAppliedTimestampRef = useRef(Number(initSnap?.updatedAt) || 0);
+  const lastResetAtRef = useRef(Number(initSnap?.lastResetAt) || 0);
   const isApplyingRemoteRef = useRef(false);
 
+  // Always record local user mutations immediately & bump local timestamp
   const markLocalMutation = useCallback(() => {
-    if (!isApplyingRemoteRef.current) {
-      setLocalMutationTick((t) => t + 1);
-    }
+    const nextTs = Math.max(Date.now(), lastAppliedTimestampRef.current + 1);
+    lastAppliedTimestampRef.current = nextTs;
+    setLocalMutationTick((t) => t + 1);
   }, []);
-
-
 
   // Helper to restore login session across browser refresh or Android app restart
   const getSavedAuthSession = () => {
@@ -532,7 +635,9 @@ export default function App() {
   const initialSession = useMemo(() => getSavedAuthSession(), []);
 
   // --- AUTH & USER STATE ---
-  const [users, setUsers] = useState(INITIAL_USERS);
+  const [users, setUsers] = useState(() =>
+    Array.isArray(initSnap?.users) && initSnap.users.length > 0 ? initSnap.users : INITIAL_USERS
+  );
   const [currentUser, setCurrentUser] = useState(() => initialSession?.currentUser || null); // persisted across refresh
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPin, setLoginPin] = useState('');
@@ -548,21 +653,41 @@ export default function App() {
     branchId: 'br-1'
   });
 
-  // --- STATE ---
-  const [role, setRole] = useState(() => initialSession?.currentUser?.role || initialSession?.role || 'owner'); // 'owner' | 'cashier'
+  // --- STATE (Initialized synchronously from localStorage so deleted items stay deleted!) ---
+  const [role, setRole] = useState(
+    () => initialSession?.currentUser?.role || initialSession?.role || 'owner'
+  ); // 'owner' | 'cashier'
   const [activeTab, setActiveTab] = useState(() => {
     const savedRole = initialSession?.currentUser?.role || initialSession?.role || 'owner';
     if (savedRole === 'cashier') return 'pos';
     return initialSession?.activeTab || 'pos';
   }); // 'pos' | 'inventory' | 'recipes' | 'reports' | 'branches'
-  const [selectedBranchId, setSelectedBranchId] = useState(() => initialSession?.selectedBranchId || 'br-1');
+  const [selectedBranchId, setSelectedBranchId] = useState(
+    () => initialSession?.selectedBranchId || (initSnap?.branches?.[0]?.id ?? 'br-1')
+  );
 
-  const [branches, setBranches] = useState(INITIAL_BRANCHES);
-  const [ingredients, setIngredients] = useState(INITIAL_INGREDIENTS);
-  const [branchStocks, setBranchStocks] = useState(INITIAL_BRANCH_STOCKS);
-  const [menus, setMenus] = useState(INITIAL_MENUS);
-  const [transactions, setTransactions] = useState(INITIAL_TRANSACTIONS);
-  const [stockLogs, setStockLogs] = useState(INITIAL_STOCK_LOGS);
+  const [branches, setBranches] = useState(() =>
+    Array.isArray(initSnap?.branches) && initSnap.branches.length > 0
+      ? initSnap.branches
+      : INITIAL_BRANCHES
+  );
+  const [ingredients, setIngredients] = useState(() =>
+    Array.isArray(initSnap?.ingredients) ? initSnap.ingredients : INITIAL_INGREDIENTS
+  );
+  const [branchStocks, setBranchStocks] = useState(() =>
+    initSnap?.branchStocks && typeof initSnap.branchStocks === 'object'
+      ? initSnap.branchStocks
+      : INITIAL_BRANCH_STOCKS
+  );
+  const [menus, setMenus] = useState(() =>
+    Array.isArray(initSnap?.menus) ? initSnap.menus : INITIAL_MENUS
+  );
+  const [transactions, setTransactions] = useState(() =>
+    Array.isArray(initSnap?.transactions) ? initSnap.transactions : INITIAL_TRANSACTIONS
+  );
+  const [stockLogs, setStockLogs] = useState(() =>
+    Array.isArray(initSnap?.stockLogs) ? initSnap.stockLogs : INITIAL_STOCK_LOGS
+  );
 
   // Toast Notification
   const [toast, setToast] = useState(null);
@@ -1084,25 +1209,44 @@ export default function App() {
     setDraftWorkspaceId(workspaceId);
   }, [workspaceId, cloudModal]);
 
-  // Smart Conflict-Free Snapshot Merger (Never drops concurrent cashier transactions!)
+  // Clean URL query params on mount if opened via ?sync= invite link
+  useEffect(() => {
+    if (initData.fromSyncLink) {
+      showToast(`Berhasil terhubung & memuat seluruh data toko (${workspaceId})!`);
+      try {
+        const cleanUrl =
+          window.location.pathname + (workspaceId ? `?toko=${encodeURIComponent(workspaceId)}` : '');
+        window.history.replaceState({}, document.title, cleanUrl);
+      } catch (e) {}
+    }
+  }, []);
+
+  // Authoritative Timestamp-Guarded Snapshot Applier
+  // Strictly rejects any older cloud message (incomingTs <= lastAppliedTimestampRef.current)
+  // so deleted or edited data NEVER comes back on refresh!
   const applyWorkspaceSnapshot = useCallback((parsed, forceReplace = false) => {
     if (!parsed || typeof parsed !== 'object') return false;
 
     const incomingTs = Number(parsed.updatedAt) || 0;
     const incomingReset = Number(parsed.lastResetAt) || 0;
 
-    // Ignore echoes from our own device if we already have this state
-    if (!forceReplace && parsed.senderId && parsed.senderId === deviceIdRef.current) {
-      return false;
+    if (!forceReplace) {
+      // Ignore our own echoes
+      if (parsed.senderId && parsed.senderId === deviceIdRef.current) {
+        return false;
+      }
+      // STRICT TIMESTAMP GUARD: Never allow an older or equal cloud snapshot to overwrite newer local data!
+      if (!incomingTs || incomingTs <= lastAppliedTimestampRef.current) {
+        return false;
+      }
     }
 
     isApplyingRemoteRef.current = true;
-    if (incomingTs > lastAppliedTimestampRef.current) {
-      lastAppliedTimestampRef.current = incomingTs;
+    if (incomingTs > lastAppliedTimestampRef.current || forceReplace) {
+      lastAppliedTimestampRef.current = incomingTs || Date.now();
     }
 
-    const isNewReset = incomingReset > lastResetAtRef.current;
-    if (isNewReset) {
+    if (incomingReset > lastResetAtRef.current || forceReplace) {
       lastResetAtRef.current = incomingReset;
       setLastResetAt(incomingReset);
     }
@@ -1122,116 +1266,18 @@ export default function App() {
     if (Array.isArray(parsed.users) && parsed.users.length > 0) {
       setUsers(parsed.users);
     }
-
-    // Merge transactions & stockLogs by unique ID unless a Reset was performed
     if (Array.isArray(parsed.transactions)) {
-      if (forceReplace || isNewReset) {
-        setTransactions(parsed.transactions);
-      } else {
-        setTransactions((prev) => {
-          const map = new Map();
-          parsed.transactions.forEach((t) => {
-            if (t && t.id) map.set(t.id, t);
-          });
-          prev.forEach((t) => {
-            if (t && t.id && !map.has(t.id)) map.set(t.id, t);
-          });
-          return Array.from(map.values());
-        });
-      }
+      setTransactions(parsed.transactions);
     }
-
     if (Array.isArray(parsed.stockLogs)) {
-      if (forceReplace || isNewReset) {
-        setStockLogs(parsed.stockLogs);
-      } else {
-        setStockLogs((prev) => {
-          const map = new Map();
-          parsed.stockLogs.forEach((l) => {
-            if (l && l.id) map.set(l.id, l);
-          });
-          prev.forEach((l) => {
-            if (l && l.id && !map.has(l.id)) map.set(l.id, l);
-          });
-          return Array.from(map.values());
-        });
-      }
+      setStockLogs(parsed.stockLogs);
     }
 
     setLastSyncTime(new Date().toTimeString().slice(0, 8));
     setTimeout(() => {
       isApplyingRemoteRef.current = false;
-    }, 80);
+    }, 60);
     return true;
-  }, []);
-
-  // Load saved workspace config & local cache on startup (with instant 1-click ?sync= link support)
-  useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const tokoParam = params.get('toko');
-      const dbParam = params.get('db');
-      const syncParam = params.get('sync');
-
-      const savedCfg = localStorage.getItem('ramujaya_cloud_config_v2');
-      let activeWs = workspaceId;
-      let activeDb = cloudEndpoint;
-
-      if (savedCfg) {
-        const cfg = JSON.parse(savedCfg);
-        if (cfg.workspaceId) activeWs = cfg.workspaceId;
-        if (cfg.cloudEndpoint) activeDb = cfg.cloudEndpoint;
-        if (cfg.cloudSecret) setCloudSecret(cfg.cloudSecret);
-      }
-
-      if (tokoParam) {
-        const cleanToko = tokoParam.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
-        if (cleanToko) activeWs = cleanToko;
-      }
-      if (dbParam) {
-        activeDb = decodeURIComponent(dbParam).trim();
-      }
-
-      // Restore local storage for this workspace first
-      const storageKey = `ramujaya_ws_v4_${activeWs}`;
-      const saved =
-        localStorage.getItem(storageKey) || localStorage.getItem('ramujaya_unified_portal_v3');
-      if (saved && !syncParam) {
-        applyWorkspaceSnapshot(JSON.parse(saved), true);
-      }
-
-      // If opening via 1-click WhatsApp sync link, immediately restore full store data!
-      if (syncParam) {
-        try {
-          const jsonStr = decodeURIComponent(escape(atob(syncParam)));
-          const parsed = JSON.parse(jsonStr);
-          applyWorkspaceSnapshot(parsed, true);
-          if (parsed.workspaceId) activeWs = parsed.workspaceId;
-          showToast(`Berhasil terhubung & memuat seluruh data toko (${activeWs})!`);
-        } catch (e) {}
-      }
-
-      setWorkspaceId(activeWs);
-      setDraftWorkspaceId(activeWs);
-      if (activeDb) setCloudEndpoint(activeDb);
-
-      localStorage.setItem(
-        'ramujaya_cloud_config_v2',
-        JSON.stringify({
-          workspaceId: activeWs,
-          cloudEndpoint: activeDb,
-          cloudSecret
-        })
-      );
-
-      if (syncParam) {
-        try {
-          const cleanUrl =
-            window.location.pathname + (activeWs ? `?toko=${encodeURIComponent(activeWs)}` : '');
-          window.history.replaceState({}, document.title, cleanUrl);
-        } catch (e) {}
-      }
-    } catch (err) {}
   }, []);
 
   // Same-device BroadcastChannel & Storage listener across tabs/windows (0ms latency)
@@ -1266,10 +1312,15 @@ export default function App() {
 
   // Build current snapshot object
   const buildCurrentSnapshot = useCallback(
-    (overrideWs = null, customResetAt = null) => {
-      const targetWs = overrideWs || workspaceId;
+    (overrideWs = null, customResetAt = null, customTs = null) => {
+      const targetWs = (overrideWs || workspaceId || 'RAMUJAYA-PUSAT')
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9_-]/g, '');
+      const ts = customTs || Math.max(Date.now(), lastAppliedTimestampRef.current);
+      lastAppliedTimestampRef.current = ts;
       return {
-        updatedAt: Date.now(),
+        updatedAt: ts,
         lastResetAt: customResetAt !== null ? customResetAt : lastResetAtRef.current,
         senderId: deviceIdRef.current,
         workspaceId: targetWs,
@@ -1285,6 +1336,55 @@ export default function App() {
     [workspaceId, branches, ingredients, branchStocks, menus, transactions, stockLogs, users]
   );
 
+  // IMMEDIATELY & SYNCHRONOUSLY save to localStorage on EVERY state change!
+  // Guarantees 0ms local persistence so refreshing 1ms after deleting/editing NEVER loses changes!
+  useEffect(() => {
+    const targetWs = (workspaceId || 'RAMUJAYA-PUSAT')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, '');
+    const ts =
+      localMutationTick > 0
+        ? Math.max(Date.now(), lastAppliedTimestampRef.current)
+        : lastAppliedTimestampRef.current || Date.now();
+    lastAppliedTimestampRef.current = ts;
+
+    const snapshot = {
+      updatedAt: ts,
+      lastResetAt: lastResetAtRef.current,
+      senderId: deviceIdRef.current,
+      workspaceId: targetWs,
+      branches,
+      ingredients,
+      branchStocks,
+      menus,
+      transactions,
+      stockLogs,
+      users
+    };
+
+    try {
+      localStorage.setItem(`ramujaya_ws_v4_${targetWs}`, JSON.stringify(snapshot));
+      localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(snapshot));
+      if (localMutationTick > 0 && 'BroadcastChannel' in window) {
+        const bc = new BroadcastChannel(`rjpos_channel_${targetWs}`);
+        bc.postMessage(snapshot);
+        bc.close();
+      }
+    } catch (e) {}
+  }, [
+    branches,
+    ingredients,
+    branchStocks,
+    menus,
+    transactions,
+    stockLogs,
+    users,
+    lastResetAt,
+    workspaceId,
+    localMutationTick
+  ]);
+
   // Instant Real-Time Broadcast to Dual WebSockets (MQTT Retain + ntfy Port-443 Stream)
   const pushToCloud = useCallback(
     async (snapshotOverride = null, silent = true) => {
@@ -1298,8 +1398,7 @@ export default function App() {
 
       // 1. Save to localStorage & BroadcastChannel immediately (0ms)
       try {
-        const storageKey = `ramujaya_ws_v4_${targetWs}`;
-        localStorage.setItem(storageKey, JSON.stringify(payload));
+        localStorage.setItem(`ramujaya_ws_v4_${targetWs}`, JSON.stringify(payload));
         localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(payload));
         if ('BroadcastChannel' in window) {
           const bc = new BroadcastChannel(`rjpos_channel_${targetWs}`);
@@ -1373,26 +1472,25 @@ export default function App() {
         }
       } else if (!silent) {
         showToast(
-          'Tersimpan di perangkat. Pastikan koneksi internet aktif untuk sinkron antar-HP.',
-          'error'
+          'Tersimpan di perangkat! Akan otomatis tersinkron saat koneksi internet aktif.',
+          'success'
         );
       }
     },
     [buildCurrentSnapshot, workspaceId, cloudEndpoint, cloudSecret]
   );
 
-  // Trigger instant cloud push ONLY when a real local user mutation happens (prevents cashier overwrite!)
+  // Trigger instant cloud push whenever a local user mutation happens
   useEffect(() => {
-    if (localMutationTick === 0 || isApplyingRemoteRef.current) return;
+    if (localMutationTick === 0) return;
     const snapshot = buildCurrentSnapshot();
     const timer = setTimeout(() => {
       pushToCloud(snapshot, true);
-    }, 120); // 120ms debounce for ultra-snappy <0.2s sync
+    }, 80);
     return () => clearTimeout(timer);
   }, [localMutationTick]);
 
   // Persistent Dual-WebSocket Connection Manager (Engine 1: MQTT WSS + Engine 2: ntfy Port-443 WSS)
-  // ZERO HTTP polling -> Never hits 429 rate limits and NEVER disconnects ("anti putus-nyambung")!
   useEffect(() => {
     const cleanWs = (workspaceId || 'RAMUJAYA-PUSAT')
       .trim()
@@ -1453,7 +1551,7 @@ export default function App() {
                 }
               }, 20000);
             } else if (packetType === 0x30) {
-              // PUBLISH frame received (either retained state on join or live update <50ms!)
+              // PUBLISH frame received
               const qos = (headerByte >> 1) & 0x03;
               let offset = frameStart;
               const topicLen = (buf[offset] << 8) | buf[offset + 1];
@@ -1462,10 +1560,27 @@ export default function App() {
               const rawPayloadStr = new TextDecoder().decode(buf.subarray(offset, frameEnd));
               const parsed = await decompressSyncPayload(rawPayloadStr);
               if (parsed && Array.isArray(parsed.branches)) {
-                applyWorkspaceSnapshot(parsed);
-                try {
-                  localStorage.setItem(`ramujaya_ws_v4_${cleanWs}`, JSON.stringify(parsed));
-                } catch (e) {}
+                const incomingTs = Number(parsed.updatedAt) || 0;
+                if (incomingTs > lastAppliedTimestampRef.current) {
+                  // Incoming cloud state is NEWER than our local state -> apply & save!
+                  const didApply = applyWorkspaceSnapshot(parsed);
+                  if (didApply) {
+                    try {
+                      localStorage.setItem(`ramujaya_ws_v4_${cleanWs}`, JSON.stringify(parsed));
+                      localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(parsed));
+                    } catch (e) {}
+                  }
+                } else if (incomingTs < lastAppliedTimestampRef.current) {
+                  // Our local state (e.g. recent deletions/edits) is NEWER than the broker's retained state!
+                  // Re-publish our newer local state so the broker catches up and never serves stale data!
+                  try {
+                    const latestLocalRaw = localStorage.getItem(`ramujaya_ws_v4_${cleanWs}`);
+                    if (latestLocalRaw && mqttSocket.readyState === WebSocket.OPEN) {
+                      const comp = await compressSyncPayload(JSON.parse(latestLocalRaw));
+                      mqttSocket.send(buildMqttPublishPacket(mqttTopic, comp, true));
+                    }
+                  } catch (e) {}
+                }
                 setCloudStatus('connected');
               }
             }
@@ -1491,11 +1606,11 @@ export default function App() {
       }
     };
 
-    // --- ENGINE 2: PORT-443 WEBSOCKET STREAM (wss://ntfy.sh/.../ws?since=12h) ---
+    // --- ENGINE 2: PORT-443 LIVE WEBSOCKET STREAM (wss://ntfy.sh/.../ws) ---
     const connectNtfyWebSocket = () => {
       if (isUnmounted) return;
       try {
-        ntfySocket = new WebSocket(`wss://ntfy.sh/rjpos_v5_${cleanTopic}/ws?since=12h`);
+        ntfySocket = new WebSocket(`wss://ntfy.sh/rjpos_v5_${cleanTopic}/ws`);
         ntfyWsRef.current = ntfySocket;
 
         ntfySocket.onopen = () => {
@@ -1519,10 +1634,16 @@ export default function App() {
             }
 
             if (parsed && Array.isArray(parsed.branches)) {
-              applyWorkspaceSnapshot(parsed);
-              try {
-                localStorage.setItem(`ramujaya_ws_v4_${cleanWs}`, JSON.stringify(parsed));
-              } catch (e) {}
+              const incomingTs = Number(parsed.updatedAt) || 0;
+              if (incomingTs > lastAppliedTimestampRef.current) {
+                const didApply = applyWorkspaceSnapshot(parsed);
+                if (didApply) {
+                  try {
+                    localStorage.setItem(`ramujaya_ws_v4_${cleanWs}`, JSON.stringify(parsed));
+                    localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(parsed));
+                  } catch (e) {}
+                }
+              }
               setCloudStatus('connected');
             }
           } catch (e) {}
@@ -1571,7 +1692,7 @@ export default function App() {
     setWorkspaceId(newCloudCode);
     setCloudStatus('connected');
 
-    const snapshot = buildCurrentSnapshot(newCloudCode);
+    const snapshot = buildCurrentSnapshot(newCloudCode, null, Date.now());
     try {
       localStorage.setItem(
         'ramujaya_cloud_config_v2',
@@ -1581,9 +1702,10 @@ export default function App() {
           cloudSecret
         })
       );
+      localStorage.setItem(`ramujaya_ws_v4_${newCloudCode}`, JSON.stringify(snapshot));
+      localStorage.setItem('ramujaya_unified_portal_v3', JSON.stringify(snapshot));
     } catch (e) {}
 
-    // Tunggu 250ms agar WebSocket ke topik baru terbuka lalu langsung unggah retained snapshot
     setTimeout(() => {
       pushToCloud(snapshot, false);
     }, 250);
@@ -1596,6 +1718,11 @@ export default function App() {
     const cleanWs =
       (draftWorkspaceId || workspaceId).trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') ||
       'RAMUJAYA-PUSAT';
+
+    // Jika berganti ke kode toko baru di HP Kasir, reset timestamp lokal agar mau menerima data dari Admin
+    if (cleanWs !== workspaceId && role === 'cashier') {
+      lastAppliedTimestampRef.current = 0;
+    }
 
     setDraftWorkspaceId(cleanWs);
     setWorkspaceId(cleanWs);
@@ -1612,12 +1739,12 @@ export default function App() {
       );
     } catch (err) {}
 
-    // Jika yang menekan tombol Hubungkan adalah Admin/Owner, kirimkan juga master data ke kode tersebut setelah 400ms (jika di cloud belum ada data yang lebih baru)
+    // Jika yang menekan tombol Hubungkan adalah Admin/Owner, unggah data Admin sebagai master
     if (role === 'owner' || currentUser?.role === 'owner') {
-      const snapshot = buildCurrentSnapshot(cleanWs);
+      const snapshot = buildCurrentSnapshot(cleanWs, null, Date.now());
       setTimeout(() => {
         pushToCloud(snapshot, true);
-      }, 450);
+      }, 350);
     }
 
     setCloudModal(false);
@@ -1632,7 +1759,7 @@ export default function App() {
     if (cleanWs !== workspaceId) {
       setWorkspaceId(cleanWs);
     }
-    const snapshot = buildCurrentSnapshot(cleanWs);
+    const snapshot = buildCurrentSnapshot(cleanWs, null, Date.now());
     await pushToCloud(snapshot, false);
   };
 
@@ -1643,16 +1770,7 @@ export default function App() {
     const dbQuery = cloudEndpoint.trim() ? `&db=${encodeURIComponent(cloudEndpoint.trim())}` : '';
     let syncQuery = '';
     try {
-      const payload = {
-        workspaceId: cleanWs,
-        branches,
-        ingredients,
-        branchStocks,
-        menus,
-        transactions,
-        stockLogs,
-        users
-      };
+      const payload = buildCurrentSnapshot(cleanWs);
       const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
       syncQuery = `&sync=${encodeURIComponent(b64)}`;
     } catch (e) {}
@@ -1729,6 +1847,7 @@ export default function App() {
       const raw = magicSyncText.trim().replace(/^RJSYNC:/, '');
       const jsonStr = decodeURIComponent(escape(atob(raw)));
       const parsed = JSON.parse(jsonStr);
+      parsed.updatedAt = Math.max(Date.now(), Number(parsed.updatedAt) || 0);
       applyWorkspaceSnapshot(parsed, true);
       if (parsed.workspaceId) {
         setWorkspaceId(parsed.workspaceId);
@@ -1761,6 +1880,7 @@ export default function App() {
     reader.onload = (evt) => {
       try {
         const parsed = JSON.parse(evt.target.result);
+        parsed.updatedAt = Math.max(Date.now(), Number(parsed.updatedAt) || 0);
         applyWorkspaceSnapshot(parsed, true);
         if (parsed.workspaceId) {
           setWorkspaceId(parsed.workspaceId);
